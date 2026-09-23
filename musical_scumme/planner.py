@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import csv
 from collections import defaultdict
-from itertools import combinations
 from dataclasses import dataclass, replace
+from itertools import combinations
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -787,9 +787,9 @@ def _register_mapping_cost_harmonic(
         total_weight += weight
         total_cost += weight * (abs(mapped - pitch) / 12.0)
     # Keep the harmonic planner centred on SCUM's base C4-C5 bank when two
-    # registers fold the source equally well.  A tiny penalty made the dynamic
-    # programme drift into the upper bank for ordinary guitar arrangements;
-    # retain lower/upper banks when their pitch fit is materially better.
+    # registers have nearly equal pitch fit. Retain lower/upper banks when
+    # their pitch fit is materially better. This is a preference, not a
+    # blanket octave reduction for every song.
     total_cost += abs(modifier) * 0.22
     return total_cost / max(total_weight, 1e-9)
 

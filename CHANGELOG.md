@@ -1,3 +1,12 @@
+## 3.9.1 — 2026-09-23
+
+- Prevent duplicate UI/hotkey instances while the player is hidden or visible.
+- Restore full-duration contextual voice budgeting and lead-track plan invalidation.
+- Audit outdated tests against current migration, MIDI channel, Simple/Advanced UI,
+  Optimal arrangement and guitar roll behavior; details in `docs/TEST_AUDIT.md`.
+- Refresh full-plan baselines with independent provenance and bank-safety checks.
+- Current-game SCUM audition remains pending.
+
 ## 3.5.1 — 2026-09-10
 
 - Numeric fields select the current number on first click and commit typed replacements on Enter or focus loss.

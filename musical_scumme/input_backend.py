@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, Sequence
 
-
 logger = logging.getLogger("musical_scumme.input_backend")
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from .model import MidiNote
 
@@ -94,25 +94,6 @@ def process_contextual_arrangement(
         held = candidate
 
     source_lead_set = set(leads)
-    # A traced melody is one owned voice. Piano pedals and legato exports often
-    # leave the previous MIDI note held beyond the next melody attack; reserving
-    # all of those overlaps as independent voices starves SCUM accompaniment.
-    # Shape only the traced lead release (never its attack/pitch) to the next lead
-    # onset when necessary. This behaves like a human changing fingering while
-    # preserving the phrase rhythm.
-    shaped_leads: list[MidiNote] = []
-    replacements: dict[int, MidiNote] = {}
-    for index, note in enumerate(leads):
-        shaped = note
-        if index + 1 < len(leads):
-            next_start = leads[index + 1].start_ms
-            if note.start_ms < next_start < note.end_ms:
-                shaped = replace(note, end_ms=next_start)
-        shaped_leads.append(shaped)
-        replacements[id(note)] = shaped
-    leads = shaped_leads
-    contexts = [replacements.get(id(note), note) for note in contexts]
-
     source = [note for group in groups for note in group]
     timeline = _VoiceTimeline(source + leads)
     for note in leads:
@@ -123,13 +104,8 @@ def process_contextual_arrangement(
     previous: tuple[int, ...] = ()
     sounding_end = float("-inf")
     capacity_rejected = collision_rejected = phrase_resets = 0
-    for group_index, (group, lead) in enumerate(zip(groups, contexts, strict=True)):
+    for group, lead in zip(groups, contexts, strict=True):
         onset = min(n.start_ms for n in group)
-        next_onset = (
-            min(n.start_ms for n in groups[group_index + 1])
-            if group_index + 1 < len(groups)
-            else None
-        )
         active = [note for note in active if note.end_ms > onset]
         if sounding_end != float("-inf") and onset - sounding_end >= 750:
             previous = ()
@@ -137,13 +113,6 @@ def process_contextual_arrangement(
         sounding_end = max(sounding_end, lead.end_ms)
         chosen: list[MidiNote] = []
         candidates = [n for n in group if n not in source_lead_set and n.pitch <= lead.pitch - 3]
-        if next_onset is not None:
-            candidates = [
-                replace(note, end_ms=next_onset)
-                if note.start_ms < next_onset < note.end_ms
-                else note
-                for note in candidates
-            ]
 
         def rank(
             note: MidiNote, lead: MidiNote = lead, previous: tuple[int, ...] = previous,

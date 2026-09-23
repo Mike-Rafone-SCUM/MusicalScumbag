@@ -203,7 +203,7 @@ def test_old_settings_without_preset_identity_migrate_to_custom(tmp_path: Path):
     assert loaded.chord_spread_ms == 17
 
 
-def test_legacy_blanket_track_selections_are_discarded_once(tmp_path: Path):
+def test_legacy_multitrack_selections_are_preserved(tmp_path: Path):
     import json
 
     path = tmp_path / "settings.json"
@@ -219,8 +219,8 @@ def test_legacy_blanket_track_selections_are_discarded_once(tmp_path: Path):
 
     loaded = load_settings(path)
 
-    assert loaded.selection_strategy_version == 2
-    assert loaded.selected_tracks_by_file == {}
+    assert loaded.selection_strategy_version == 3
+    assert loaded.selected_tracks_by_file == {"song.mid": [1, 2, 3, 4]}
 
 
 def test_invalid_selection_migration_marker_does_not_reset_other_settings(tmp_path: Path):
@@ -243,7 +243,21 @@ def test_invalid_selection_migration_marker_does_not_reset_other_settings(tmp_pa
 
     assert loaded.performance_preset == "custom"
     assert loaded.speed == 0.93
-    assert loaded.selected_tracks_by_file == {}
+    assert loaded.selected_tracks_by_file == {"song.mid": [1, 2]}
+
+
+def test_type_zero_selection_migration_only_clears_ambiguous_legacy_choice(tmp_path: Path):
+    import json
+
+    path = tmp_path / "settings.json"
+    selections = {"type-zero.mid": [0], "ensemble.mid": [0, 2], "empty.mid": []}
+    path.write_text(json.dumps({"selection_strategy_version": 2,
+                                "selected_tracks_by_file": selections}), encoding="utf-8")
+    loaded = load_settings(path)
+    assert loaded.selected_tracks_by_file == {"ensemble.mid": [0, 2], "empty.mid": []}
+    loaded.selected_tracks_by_file["type-zero.mid"] = [0]
+    save_settings(loaded, path)
+    assert load_settings(path).selected_tracks_by_file == selections
 
 
 def test_mapping_policy_settings_normalize_and_round_trip(tmp_path: Path):

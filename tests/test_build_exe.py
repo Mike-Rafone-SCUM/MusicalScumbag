@@ -37,7 +37,7 @@ def test_build_path_prefers_system_runtime_and_restores_caller_path(tmp_path, fa
     # run dependency installation or delete build/output directories in tests.
     prefix = source[source.index("$originalBuildPath ="):source.index("& $venvPython -m PyInstaller")]
     suffix = source[source.index("}\nfinally {", source.index("& $venvPython -m PyInstaller")):]
-    suffix = suffix[:suffix.index("\n\nif ($OneFile)")]
+    suffix = suffix[:suffix.index('Write-Host "Built:')]
     probe = tmp_path / "build-path-probe.ps1"
     body = r"""
 if (($env:PATH -split ';')[0] -ne "$env:SystemRoot\System32") { throw 'Wrong runtime priority' }

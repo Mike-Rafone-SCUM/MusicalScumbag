@@ -1,4 +1,4 @@
-"""Complete-output regression snapshots captured before resource optimisation."""
+"""Complete-output baseline audited on 2026-09-23; see docs/TEST_AUDIT.md."""
 import hashlib
 import json
 from dataclasses import asdict
@@ -30,19 +30,46 @@ def resource_fixture():
     ]
 
 
+def capture_plan(key):
+    arrangement, mode, transpose = key.split("/")
+    return build_playback_plan(
+        resource_fixture(),
+        AppSettings(mapping_mode=mode, arrangement_mode=arrangement, transpose=int(transpose)),
+        CURRENT_SCUM_PROFILE,
+    )
+
+
+def plan_digest(plan):
+    return hashlib.sha256(json.dumps(asdict(plan), sort_keys=True).encode()).hexdigest()
+
+
+def assert_plan_invariants(plan):
+    assert plan.retained_notes == len(plan.planned_notes) > 0
+    assert [event.at_ms for event in plan.events] == sorted(event.at_ms for event in plan.events)
+    source_pitches = {note.pitch for note in resource_fixture()}
+    for note in plan.planned_notes:
+        assert note.source_pitch in source_pitches
+        assert note.start_ms < note.end_ms
+        assert note.end_ms - note.start_ms <= 2000.001
+        assert note.mapped_pitch == note.base_pitch + 12 * note.modifier
+    held = set()
+    bank_keys = {CURRENT_SCUM_PROFILE.octave_up, CURRENT_SCUM_PROFILE.octave_down}
+    for event in plan.events:
+        if event.action == "down":
+            if event.key in bank_keys:
+                assert not held
+            else:
+                assert not held & bank_keys
+            held.add(event.key)
+        else:
+            held.discard(event.key)
+    assert not held
+
+
 def test_optimised_plans_preserve_complete_musical_and_timing_output():
     snapshots = json.loads((Path(__file__).parent / "fixtures/resource_plan_digests.json").read_text())
-    notes = resource_fixture()
     for key, expected in snapshots.items():
-        arrangement, mode, transpose = key.split("/")
-        plan = build_playback_plan(
-            notes, AppSettings(mapping_mode=mode, arrangement_mode=arrangement, transpose=int(transpose)),
-            CURRENT_SCUM_PROFILE,
-        )
-        payload = asdict(plan)
-        # Newly exposed enhanced-match audit fields are additive metadata;
-        # every prior diagnostic, note, event, warning and timestamp must match.
-        for added in ("automatic_pitch_shift_semitones", "pitch_match_exact_notes", "pitch_match_octave_folded_notes"):
-            payload["diagnostics"].pop(added, None)
-        digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        plan = capture_plan(key)
+        assert_plan_invariants(plan)
+        digest = plan_digest(plan)
         assert digest == expected, key

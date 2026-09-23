@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import ctypes
 import gc
-from ctypes import wintypes
 import logging
 import os
 import threading
 import time
 from bisect import bisect_left
+from ctypes import wintypes
 from dataclasses import dataclass
 from operator import attrgetter
 from typing import Callable

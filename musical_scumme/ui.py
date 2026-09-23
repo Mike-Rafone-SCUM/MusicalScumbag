@@ -27,8 +27,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSlider,
     QSizePolicy,
+    QSlider,
     QSplitter,
     QStatusBar,
     QTableWidget,
@@ -79,8 +79,8 @@ from .live_midi import (
 from .midi_engine import load_midi
 from .model import MidiNote, PlaybackPlan, midi_note_name
 from .numeric_widgets import QDoubleSpinBox, QSpinBox
-from .planner import build_playback_plan, export_plan_csv, export_score_csv, recommend_optimal_transpose
 from .performance_health import assess_performance
+from .planner import build_playback_plan, export_plan_csv, export_score_csv, recommend_optimal_transpose
 from .playback_sections import (
     PlaybackSection,
     PlaybackSelectionResult,
@@ -2784,6 +2784,8 @@ class MainWindow(QMainWindow):
     def _arrangement_lead_changed(self, *_args) -> None:
         if not self._loading_ui:
             self.settings.arrangement_lead_track = int(self.arrangement_lead_combo.currentData())
+            self._mark_performance_custom()
+            self.invalidate_plan()
 
     def _performance_preset_changed(self, _index: int) -> None:
         if self._loading_ui or self._applying_preset:
@@ -4258,10 +4260,19 @@ class MainWindow(QMainWindow):
 
 def run() -> int:
     app = QApplication.instance() or QApplication([])
+    from .single_instance import acquire_instance_lock
+
+    instance_lock = acquire_instance_lock()
+    if instance_lock is None:
+        logger.info("Application is already running; ignoring duplicate launch. Use F11 to show it.")
+        return 0
     app.setApplicationName("MusicalScumbag")
     app.setApplicationVersion(__version__)
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE)
     window = MainWindow()
     window.show()
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        instance_lock.unlock()

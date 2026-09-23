@@ -276,7 +276,7 @@ def test_reset_controllers_cc121_releases_only_that_channels_sustain(
 
 
 @pytest.mark.parametrize("control", (120, 123))
-def test_all_sound_and_all_notes_off_are_global_safety_panics(
+def test_all_sound_and_all_notes_off_release_only_the_addressed_channel(
     session_factory,
     control,
 ):
@@ -285,15 +285,29 @@ def test_all_sound_and_all_notes_off_are_global_safety_panics(
     harness.emit(note_on(62, channel=1))
     wait_until(lambda: harness.backend.pressed == {"Y", "O"})
 
-    harness.emit(control_change(control, 0, channel=9))
-    wait_until(lambda: harness.backend.pressed == set())
+    harness.emit(control_change(control, 0, channel=0))
+    wait_until(lambda: harness.backend.pressed == {"O"})
     assert harness.session.running
 
-    history_after_panic = list(harness.backend.history)
+    history_after_release = list(harness.backend.history)
     harness.emit(note_off(60, channel=0))
-    harness.emit(note_off(62, channel=1))
     time.sleep(0.02)
-    assert harness.backend.history == history_after_panic
+    assert harness.backend.history == history_after_release
+    harness.emit(note_off(62, channel=1))
+    wait_until(lambda: harness.backend.pressed == set())
+
+
+@pytest.mark.parametrize("control", (120, 123))
+def test_channel_release_preserves_a_shared_folded_key(session_factory, control):
+    harness = session_factory()
+    harness.emit(note_on(60, channel=0))
+    harness.emit(note_on(48, channel=1))
+    harness.emit(control_change(control, 0, channel=0))
+    # Queue another key to confirm the worker passed the channel release.
+    harness.emit(note_on(62, channel=1))
+    wait_until(lambda: harness.backend.pressed == {"Y", "O"})
+    harness.emit(control_change(control, 0, channel=1))
+    wait_until(lambda: harness.backend.pressed == set())
 
 
 def test_channel_selection_and_channel_10_filter_are_enforced(session_factory):

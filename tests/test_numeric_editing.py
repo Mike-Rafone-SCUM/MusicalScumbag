@@ -22,6 +22,8 @@ def test_typing_full_number_keeps_focus_and_commits(name, text, expected, tmp_pa
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
     try:
+        window._set_ui_mode("advanced")
+        window.settings_tabs.setCurrentIndex(2 if name in {"polyphony_spin", "min_hold_spin"} else 0)
         window.performance_combo.setCurrentIndex(window.performance_combo.findData("custom"))
         window.show()
         spin = getattr(window, name)

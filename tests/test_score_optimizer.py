@@ -121,9 +121,9 @@ def test_optimal_sound_policy_preserves_source_chords_without_generating_notes()
     optimal, analysis = optimal_settings_for_notes(source, AppSettings())
 
     assert analysis.texture == "chordal"
-    assert optimal.arrangement_mode == "intelligent"
+    assert optimal.arrangement_mode == "chamber_director"
     assert optimal.chord_recognition_mode == "auto"
-    assert optimal.mapping_mode == "fold_smart"
+    assert optimal.mapping_mode == "smart3_harmonic"
     assert optimal.max_polyphony == 3
     assert optimal.chord_spread_ms == 12
 
@@ -260,11 +260,12 @@ def test_rolled_sustained_source_chords_trigger_chord_policy_and_alignment():
         for phrase in (0, 500, 1000)
         for pitch, offset in ((60, 0), (64, 20), (67, 40))
     ]
-    settings = AppSettings(performance_preset="optimal")
+    settings = AppSettings(performance_preset="custom", arrangement_mode="intelligent",
+                           chord_recognition_mode="auto")
 
     plan = build_playback_plan(source, settings, CURRENT_SCUM_PROFILE)
 
-    assert plan.diagnostics["score_texture"] == "chordal"
+    assert analyse_notes(source).texture == "chordal"
     assert plan.diagnostics["performed_chord_groups"] == 3
     assert plan.diagnostics["score_chord_groups"] == 3
     assert plan.retained_notes == len(source)

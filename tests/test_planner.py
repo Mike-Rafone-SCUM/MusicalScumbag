@@ -231,7 +231,7 @@ def test_scum_pitch_match_does_not_shift_an_already_playable_register():
     assert plan.diagnostics["pitch_match_exact_notes"] == len(pitches)
 
 
-def test_optimal_plan_uses_solo_adaptive_mapping_and_zero_solo_stagger():
+def test_optimal_vocal_director_keeps_singer_over_simultaneous_instrumental_solo():
     source: list[MidiNote] = []
     solo_pitches = (84, 86, 88, 89, 91, 89, 88, 86)
     for index in range(20):
@@ -257,18 +257,11 @@ def test_optimal_plan_uses_solo_adaptive_mapping_and_zero_solo_stagger():
         track_names={1: "Lead Vocal", 2: "Guitar Solo", 3: "Bass"},
     )
 
-    assert plan.diagnostics["solo_segments"] == 1
-    assert plan.diagnostics["effective_mapping_mode"] == "solo_adaptive"
-    assert plan.diagnostics["solo_mapping_exact_notes"] == len(solo_pitches)
-    assert plan.diagnostics["solo_mapping_folded_notes"] == 0
-    assert plan.diagnostics["solo_chord_stagger_suppressed_groups"] == len(solo_pitches)
-    solo_notes = [item for item in plan.planned_notes if item.source_pitch in solo_pitches]
-    assert len(solo_notes) == len(solo_pitches)
-    assert all(item.modifier == 1 for item in solo_notes)
-    assert any("Solo-adaptive mapping" in warning for warning in plan.warnings)
-    for score_group in {item.score_group for item in solo_notes}:
-        group = [item for item in plan.planned_notes if item.score_group == score_group]
-        assert len({item.start_ms for item in group}) == 1
+    assert plan.diagnostics["solo_segments"] == 0
+    assert plan.diagnostics["effective_mapping_mode"] != "solo_adaptive"
+    lead_notes = [item for item in plan.planned_notes if item.source_pitch in {64, 65, 66}]
+    assert len(lead_notes) == 20
+    assert not any(item.source_pitch in solo_pitches for item in plan.planned_notes)
 
 
 def test_obsolete_guitar_preset_migrates_without_dropping_short_arpeggio_attack():
@@ -605,7 +598,7 @@ def test_every_mapping_mode_keeps_actual_key_holds_within_instrument_ceiling():
             assert held_since == {}
 
 
-def test_chord_stagger_is_per_note_and_lead_is_first():
+def test_untraced_guitar_chord_stagger_is_low_to_high():
     settings = AppSettings(
         mapping_mode="strict_auto",
         arrangement_mode="faithful",
@@ -621,7 +614,7 @@ def test_chord_stagger_is_per_note_and_lead_is_first():
         CURRENT_SCUM_PROFILE,
     )
     starts = sorted((item.start_ms, item.source_pitch) for item in plan.planned_notes)
-    assert starts == [(0.0, 72), (25.0, 60), (50.0, 64)]
+    assert starts == [(0.0, 60), (25.0, 64), (50.0, 72)]
 
 
 def test_physical_retrigger_gap_is_enforced_after_octave_folding():
@@ -900,6 +893,22 @@ def test_smart3_harmonic_prefers_base_bank_when_pitch_fit_is_tied():
     plan = build_playback_plan([note(72)], settings, CURRENT_SCUM_PROFILE)
     assert plan.planned_notes[0].modifier == 0
     assert plan.planned_notes[0].mapped_pitch == 72
+
+
+def test_harmonic_base_preference_wins_a_small_upper_voice_velocity_advantage():
+    settings = AppSettings(mapping_mode="smart3_harmonic", arrangement_mode="faithful",
+                           max_polyphony=2, chord_spread_ms=0)
+    plan = build_playback_plan([note(60, velocity=100), note(76, velocity=104)],
+                               settings, CURRENT_SCUM_PROFILE)
+    assert [n.mapped_pitch for n in plan.planned_notes] == [60, 64]
+    assert all(n.modifier == 0 for n in plan.planned_notes)
+
+
+def test_harmonic_base_preference_does_not_flatten_a_genuinely_high_phrase():
+    settings = AppSettings(mapping_mode="smart3_harmonic", arrangement_mode="faithful")
+    plan = build_playback_plan([note(76)], settings, CURRENT_SCUM_PROFILE)
+    assert plan.planned_notes[0].mapped_pitch == 76
+    assert plan.planned_notes[0].modifier == 1
 
 
 def test_melody3_contour_preserves_ascending_contour():

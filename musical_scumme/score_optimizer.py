@@ -11,8 +11,8 @@ from typing import Iterable
 from .arrangement_options import ARRANGEMENT_RECIPES
 from .arranger import _is_vocal_name, recognised_score_onsets
 from .config import AppSettings
-from .instrument_profiles import resolve_instrument_profile
 from .gm import describe_program
+from .instrument_profiles import resolve_instrument_profile
 from .model import MidiNote, MidiProject, MidiTrack
 
 _LEAD_WORDS = ("lead", "melody", "vocal", "voice", "solo", "guitar", "flute", "sax", "violin")

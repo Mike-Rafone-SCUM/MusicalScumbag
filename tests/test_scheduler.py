@@ -126,8 +126,12 @@ def test_scheduler_emits_timecode_callbacks():
         pause_on_focus_loss=True,
     )
     wait_until_stopped(scheduler)
-    assert len(recorded_timecodes) >= 2
-    assert recorded_timecodes[0][1] == 10.0
+    # A 10 ms performance is shorter than the 33 ms UI throttle. A late first
+    # batch may be skipped; final position must still be delivered exactly.
+    assert recorded_timecodes
+    assert recorded_timecodes[-1] == (10.0, 10.0)
+    assert all(total == 10.0 for _, total in recorded_timecodes)
+    assert recorded_timecodes == sorted(recorded_timecodes)
 
 
 def test_scheduler_seek_forward_skips_intermediate_events():
@@ -343,7 +347,6 @@ def test_scheduler_recovers_from_system_stall_without_skipping():
         ("up", "I"),
     ]
     assert scheduler.last_metrics.batches_sent == 4
-
 
 
 
