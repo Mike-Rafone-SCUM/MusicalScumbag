@@ -887,6 +887,21 @@ def test_smart3_harmonic_prioritizes_bass_and_melody_register():
     assert all(item.modifier == -1 for item in plan.planned_notes)
 
 
+def test_smart3_harmonic_prefers_base_bank_when_pitch_fit_is_tied():
+    settings = AppSettings(
+        mapping_mode="smart3_harmonic",
+        arrangement_mode="faithful",
+        ignore_percussion=False,
+        min_source_note_ms=0,
+        min_retrigger_ms=0,
+        max_polyphony=1,
+        chord_spread_ms=0,
+    )
+    plan = build_playback_plan([note(72)], settings, CURRENT_SCUM_PROFILE)
+    assert plan.planned_notes[0].modifier == 0
+    assert plan.planned_notes[0].mapped_pitch == 72
+
+
 def test_melody3_contour_preserves_ascending_contour():
     settings = AppSettings(
         mapping_mode="melody3_contour",

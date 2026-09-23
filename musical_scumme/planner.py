@@ -786,7 +786,11 @@ def _register_mapping_cost_harmonic(
             weight *= 2.2
         total_weight += weight
         total_cost += weight * (abs(mapped - pitch) / 12.0)
-    total_cost += abs(modifier) * 0.05
+    # Keep the harmonic planner centred on SCUM's base C4-C5 bank when two
+    # registers fold the source equally well.  A tiny penalty made the dynamic
+    # programme drift into the upper bank for ordinary guitar arrangements;
+    # retain lower/upper banks when their pitch fit is materially better.
+    total_cost += abs(modifier) * 0.22
     return total_cost / max(total_weight, 1e-9)
 
 
