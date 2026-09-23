@@ -1,3 +1,0 @@
-# Basic Pitch 0.4.0 depends on resampy 0.4.2, which imports pkg_resources.
-# setuptools 82+ removed pkg_resources, so this runtime must stay on the final compatible line.
-setuptools==80.10.2

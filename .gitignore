@@ -16,3 +16,8 @@ settings.json
 settings.json.bak
 *.zip
 release-staging/
+AGENTS.md
+PROJECT_CONTEXT.md
+REGRESSION_CHECKLIST.md
+SCUM_COMPATIBILITY_REPORT.md
+VALIDATION.md

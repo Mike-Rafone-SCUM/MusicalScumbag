@@ -1,6 +1,5 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
-    [switch]$OneFile,
     [switch]$CleanEnvironment,
     [string]$OutputRoot
 )
@@ -79,7 +78,6 @@ $workDir = if ($OutputRoot) { Join-Path $PSScriptRoot ("build\" + (Split-Path -L
 Remove-Item -LiteralPath $workDir, $distRoot -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath MusicalScumbag.spec, MusicalScumme.spec -Force -ErrorAction SilentlyContinue
 
-$mode = if ($OneFile) { '--onefile' } else { '--onedir' }
 # Qt imports the Windows ICU API. Prefer System32 over unrelated developer
 # tools on PATH (for example Poppler's incompatible, version-suffixed ICU).
 $originalBuildPath = $env:PATH
@@ -89,23 +87,13 @@ try {
     --noconfirm `
     --clean `
     --windowed `
-    $mode `
+    --onefile `
     --name MusicalScumbag `
     --version-file "$PSScriptRoot\version_info.txt" `
     --distpath $distRoot `
     --paths $PSScriptRoot `
     --additional-hooks-dir "$PSScriptRoot\packaging_hooks" `
     --hidden-import rtmidi `
-    --add-data "$PSScriptRoot\audio_worker.py;." `
-    --add-data "$PSScriptRoot\install_audio_tools.ps1;." `
-    --add-data "$PSScriptRoot\requirements-audio.txt;." `
-    --add-data "$PSScriptRoot\requirements-audio-constraints.txt;." `
-    --add-data "$PSScriptRoot\validate_audio_runtime.py;." `
-    --add-data "$PSScriptRoot\separation_worker.py;." `
-    --add-data "$PSScriptRoot\install_separation_tools.ps1;." `
-    --add-data "$PSScriptRoot\requirements-separation.txt;." `
-    --add-data "$PSScriptRoot\requirements-separation-cuda.txt;." `
-    --add-data "$PSScriptRoot\validate_separation_runtime.py;." `
     --exclude-module PySide6.QtWebEngineCore `
     --exclude-module PySide6.QtWebEngineWidgets `
     --exclude-module PySide6.QtPdf `
@@ -119,9 +107,5 @@ finally {
     $env:PATH = $originalBuildPath
 }
 
-if ($OneFile) {
-    Write-Host "Built: $distRoot\MusicalScumbag.exe"
-} else {
-    Write-Host "Built: $distRoot\MusicalScumbag\MusicalScumbag.exe"
-    Write-Host 'Keep the whole MusicalScumbag folder together.'
-}
+
+Write-Host "Built: $distRoot\MusicalScumbag.exe"

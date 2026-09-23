@@ -1,24 +1,23 @@
-# MusicalScumbag 3.9.0
+﻿# MusicalScumbag 3.9.0
 
-MusicalScumbag converts MIDI and user-selected audio into a deterministic, auditable SCUM instrument score, and can route a user-played MIDI keyboard to a SCUM instrument in real time. It sends ordinary supervised keyboard input only while SCUM is in the foreground. It does not inject into the game, read game memory, automate gameplay, or edit game files.
+MusicalScumbag converts MIDI into a deterministic, auditable SCUM instrument score, and can route a user-played MIDI keyboard to a SCUM instrument in real time. It sends ordinary supervised keyboard input only while SCUM is in the foreground. It does not inject into the game, read game memory, automate gameplay, or edit game files.
 
-The primary workflow uses the untouched `.mid` or `.midi` file downloaded from MIDI Find or another score source. Song Transposer and Audio → MIDI remain optional conversion tools; they are not required for ordinary MIDI playback, and MusicalScumbag never rewrites the imported source file.
-
+The primary workflow uses the untouched `.mid` or `.midi` file downloaded from MIDI Find or another score source. MusicalScumbag never rewrites the imported source file.
 ## Conversion and playback pipeline
 
 From the moment a MIDI is imported, MusicalScumme now runs one coherent pipeline:
 
-1. **Strict MIDI parse** — tempo changes, sustain, overlapping notes, track names, channels, velocities, and durations are preserved. The only recovery path clips illegal MIDI data bytes when Mido reports that exact error; unrelated corruption remains fatal.
-2. **Relationship-aware track analysis** — each populated track is scored as a lead candidate, chord/support track, bass, percussion, or noise/effect using token-safe names, register, activity, coverage, monophony, continuity, and real chord attacks. Exact doubled parts are rejected instead of wasting SCUM polyphony.
-3. **Musical selection** — the importer chooses a primary lead, useful sectional solo handoff, bass, and harmonic support by measuring shared attacks, exclusivity, time coverage, register separation, continuity, and duplication instead of ranking tracks in isolation. Remembered user choices remain authoritative.
-4. **Source-texture and phrase analysis** — the selected score is classified as single-line melody, light polyphony, chord-led, or dense polyphony using attack and sounding polyphony, exact and rolled source chords, separate musical-onset and physical-note rates, rhythmic variation, phrase boundaries, durations, track count, and pitch span.
-5. **Whole-phrase voice intelligence** — a deterministic dynamic program traces one source-backed lead through the complete score. It rewards coherent contour and track continuity, resists loud/high transient theft, and relaxes continuity only at detected phrase boundaries so real register resets survive.
-6. **Dynamic Solo Director** — rolling source-time evidence identifies sustained alternate-lead sections even when the primary lead remains active. The solo reserves voice one, competing upper accompaniment is ducked, and only one lower foundation voice may remain.
-7. **Source-backed voicing** — bass and harmony retention considers the active lead, prior support voices, consonance, compactness, duration, velocity, and register role. It can discard source notes but never invent a pitch or chord tone.
-8. **Optimal Sounding policy** — arrangement, chord recognition, mapping, polyphony, filtering, landmark-aware run reduction, pulse-relative chord roll, note holds, key gaps, density, and octave-bank timing are derived from that score. Playback speed and transpose remain explicit.
-9. **SCUM score planning** — real notes are mapped to the 13-key chromatic bank. Accompaniment uses Enhanced Fold while protected solos receive enhanced section-specific pitch fitting and contour banking. Ctrl/Shift octave-bank taps remain standalone and never overlap a musical key.
-10. **Guided command deck** — a persistent Load → Review → Prepare → Play rail shows the current prerequisite, selected-track count, plan readiness, dry-run state, and safest next action.
-11. **Supervised playback or export** — prepare the result, inspect selectable bullet advisories, export the musical SCUM score or low-level key events, then start playback manually.
+1. **Strict MIDI parse** â€” tempo changes, sustain, overlapping notes, track names, channels, velocities, and durations are preserved. The only recovery path clips illegal MIDI data bytes when Mido reports that exact error; unrelated corruption remains fatal.
+2. **Relationship-aware track analysis** â€” each populated track is scored as a lead candidate, chord/support track, bass, percussion, or noise/effect using token-safe names, register, activity, coverage, monophony, continuity, and real chord attacks. Exact doubled parts are rejected instead of wasting SCUM polyphony.
+3. **Musical selection** â€” the importer chooses a primary lead, useful sectional solo handoff, bass, and harmonic support by measuring shared attacks, exclusivity, time coverage, register separation, continuity, and duplication instead of ranking tracks in isolation. Remembered user choices remain authoritative.
+4. **Source-texture and phrase analysis** â€” the selected score is classified as single-line melody, light polyphony, chord-led, or dense polyphony using attack and sounding polyphony, exact and rolled source chords, separate musical-onset and physical-note rates, rhythmic variation, phrase boundaries, durations, track count, and pitch span.
+5. **Whole-phrase voice intelligence** â€” a deterministic dynamic program traces one source-backed lead through the complete score. It rewards coherent contour and track continuity, resists loud/high transient theft, and relaxes continuity only at detected phrase boundaries so real register resets survive.
+6. **Dynamic Solo Director** â€” rolling source-time evidence identifies sustained alternate-lead sections even when the primary lead remains active. The solo reserves voice one, competing upper accompaniment is ducked, and only one lower foundation voice may remain.
+7. **Source-backed voicing** â€” bass and harmony retention considers the active lead, prior support voices, consonance, compactness, duration, velocity, and register role. It can discard source notes but never invent a pitch or chord tone.
+8. **Optimal Sounding policy** â€” arrangement, chord recognition, mapping, polyphony, filtering, landmark-aware run reduction, pulse-relative chord roll, note holds, key gaps, density, and octave-bank timing are derived from that score. Playback speed and transpose remain explicit.
+9. **SCUM score planning** â€” real notes are mapped to the 13-key chromatic bank. Accompaniment uses Enhanced Fold while protected solos receive enhanced section-specific pitch fitting and contour banking. Ctrl/Shift octave-bank taps remain standalone and never overlap a musical key.
+10. **Guided command deck** â€” a persistent Load â†’ Review â†’ Prepare â†’ Play rail shows the current prerequisite, selected-track count, plan readiness, dry-run state, and safest next action.
+11. **Supervised playback or export** â€” prepare the result, inspect selectable bullet advisories, export the musical SCUM score or low-level key events, then start playback manually.
 
 The analyser never guesses a key signature, quantises notes to a scale, generates harmony, borrows support notes into Lead melody, or rewrites the source MIDI.
 
@@ -121,7 +120,6 @@ Track search filters large scores by number, name, detected role, note count, or
 
 Prepare, Play, Score CSV, and Events CSV activate only when their prerequisites exist. Play still prepares automatically when settings changed. Preparation shows a busy state and never sends keyboard input. Results use a compact multi-line summary plus selectable bullet advisories, while Dry run clearly states that no keyboard output will occur.
 
-Audio-to-MIDI and Song Transposer validate their source, destinations, runtime availability, overwrite separation, and UVR requirements inline. Song Transposer settings scroll vertically at 880×720 while its log and actions remain reachable. Invalid custom key names keep the key editor open with a visible correction message.
 
 Keyboard additions are **Ctrl+P** Prepare, **Ctrl+L** focus MIDI path, **F1** Quick Start, and **Delete** remove selected playback section. Existing Ctrl+O, Ctrl+R, F8, F9, and F11 behavior is unchanged.
 
@@ -153,14 +151,6 @@ Losing SCUM focus pauses safely when the default protection is enabled. Stop, co
 
 This is the musical score. **Events CSV** is the lower-level keyboard timeline for diagnostics. Both exports are deterministic; the SCUM-score export is published through a same-directory temporary file.
 
-## Song Transposer and audio
-
-**Song Transposer** cleans a rough MIDI or transcribed audio source into a separate Lead Melody track and optional Light Support track. It performs deterministic overtone rejection, double-attack consolidation, contextual octave repair, and global melody-path selection. It never overwrites the source.
-
-**Audio → MIDI** uses Spotify Basic Pitch in a separate per-user Python runtime. Full-song audio is an approximation; clean vocals or isolated instruments work best.
-
-Optional UVR-compatible source separation runs in another isolated runtime containing `audio-separator` and PyTorch. The maintained two-stem default is BS-RoFormer Viperx-1297. It publishes visible vocals and instrumental WAV files, then transcribes only the selected stem. Neither ML runtime is imported into the main Qt/playback process.
-
 ## Run from source
 
 Requires 64-bit Python 3.11 or newer on Windows.
@@ -182,24 +172,30 @@ For development checks:
 
 ## Build the Windows release
 
-Run one of:
+Run:
+
+```powershell
+.\Build EXE.bat
+```
+
+or directly:
 
 ```powershell
 .\build_exe.ps1
-.\build_exe.ps1 -OneFile
-python build_exe.py
 ```
 
-The default build is an onedir application. Keep the complete `MusicalScumme` folder together. The packaged application includes the audio/separation installers, validators, workers, and requirement files; model environments and downloaded model weights remain external.
+The release build is a single self-contained Windows executable. The final distributable is copied to:
 
+```text
+release\MusicalScumbag.exe
+```
 ## Safety and validation boundaries
 
 - Playback is foreground-only by default and always user-initiated.
 - Live MIDI input is manually armed, never recorded or replayed, and remains muted outside SCUM by default.
 - F8 is the emergency stop.
 - No injection, hooks, game-memory access, anti-cheat bypass, stealth, gameplay automation, or game-file changes.
-- Audio conversion reads one user-selected file and writes only user-confirmed outputs. It never sends SCUM input.
 - Static tests and packaged launch checks do not prove musical quality inside the current SCUM build. A release is not **SCUM tested** until it is auditioned in-game on Windows.
-- Audio conversion is not fully validated for a release until representative MP3, WAV, and M4A files have run through the installed Basic Pitch runtime.
 
 See [CHANGELOG.md](CHANGELOG.md), [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md), and [REGRESSION_CHECKLIST.md](REGRESSION_CHECKLIST.md) for detailed history, constraints, and validation evidence.
+
