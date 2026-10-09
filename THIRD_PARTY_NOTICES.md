@@ -37,3 +37,15 @@ The separation environment installs PyTorch and ONNX Runtime GPU packages under 
 ## Model and transitive dependencies
 
 The optional audio environment installs Basic Pitch and its declared dependencies from Python package indexes. Those packages and model files retain their own licences. Review the installed environment before redistributing it.
+
+## YourMT3+ and torchcrepe — optional
+
+The isolated advanced transcription worker uses [YourMT3+](https://github.com/mimbres/YourMT3) and [torchcrepe](https://github.com/maxrmorrison/torchcrepe). These packages and their checkpoints are downloaded separately; the application executable does not bundle their model weights or the heavy inference runtime. Credit belongs to their authors, and their own software and checkpoint terms apply.
+
+## Additional UVR vocal-treatment models — optional
+
+Selectable vocal treatment downloads DeEcho/DeReverb V2 and Aufr33 denoise model weights into the isolated UVR cache. Credit belongs to the UVR ecosystem and the individual model authors. These model weights are not part of the application executable.
+
+## LRCLIB — optional online lyrics
+
+Automatic and manual lyric searches use [LRCLIB](https://lrclib.net/docs). No lyric collection is bundled with the release; lyrics selected by the user are stored separately from the application.
