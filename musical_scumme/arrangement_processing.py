@@ -72,7 +72,7 @@ def _pitch_intervals(notes: list[MidiNote]) -> dict[int, tuple[list[float], list
 
 def process_contextual_arrangement(
     groups: list[list[MidiNote]], traced: tuple[MidiNote, ...], primary: int,
-    layers: int, texture: str,
+    layers: int, texture: str, layer_roles: dict[int, str] | None = None,
 ) -> ContextualArrangement:
     """Reserve all lead spans before choosing exact, existing support attacks.
 
@@ -82,16 +82,21 @@ def process_contextual_arrangement(
     leads: list[MidiNote] = []
     contexts: list[MidiNote] = []
     held: MidiNote | None = None
+    is_cover = texture in {"cover", "cover_riff"}
     for group, candidate in zip(groups, traced, strict=True):
         owned = any(n.track_index == primary for n in group)
         onset = min(n.start_ms for n in group)
-        if held is not None and onset < held.end_ms and not owned:
+        continuing_fill = is_cover and held is not None and candidate.track_index == held.track_index
+        if held is not None and onset < held.end_ms and not owned and not continuing_fill:
             contexts.append(held)
             continue
         leads.append(candidate)
         contexts.append(candidate)
         # Also protect instrumental fills and inferred/unnamed lead sustains.
         held = candidate
+
+    if is_cover:
+        return _combine_cover_layers(groups, contexts, leads, layers, layer_roles or {}, texture == "cover_riff")
 
     source_lead_set = set(leads)
     source = [note for group in groups for note in group]
@@ -167,3 +172,56 @@ def process_contextual_arrangement(
         tuple(leads), tuple(support), capacity_rejected, collision_rejected,
         phrase_resets, timeline.maximum[0],
     )
+
+
+def _combine_cover_layers(
+    groups: list[list[MidiNote]], contexts: list[MidiNote], leads: list[MidiNote],
+    layers: int, roles: dict[int, str], riff_first: bool = False,
+) -> ContextualArrangement:
+    """Reserve complete bass/rhythm lines before filling remaining harmony space.
+
+    Chronological greedy harmony selection can occupy the rhythm's later slots.
+    Separate passes protect source rhythmic attacks without truncating releases.
+    One sounding support voice per role prevents doubled bass or stacked riffs.
+    """
+    source = [n for group in groups for n in group]
+    timeline = _VoiceTimeline(source)
+    pitches = {pitch: _VoiceTimeline([n for n in source if n.pitch == pitch])
+               for pitch in {n.pitch for n in source}}
+    role_timelines = {role: _VoiceTimeline(source) for role in ("bass", "rhythm", "harmony", "fill", "lead")}
+    for note in leads:
+        timeline.voices(note, add=True)
+        pitches[note.pitch].voices(note, add=True)
+    lead_set = set(leads)
+    candidates = []
+    order = {"bass": 0, "rhythm": 1, "harmony": 2, "lead": 2, "fill": 3}
+    if riff_first:
+        order.update(rhythm=0, bass=1)
+    for group, lead in zip(groups, contexts, strict=True):
+        for note in group:
+            if note in lead_set:
+                continue
+            role = roles.get(note.track_index, "harmony")
+            if role == "bass" and note.pitch > lead.pitch - 3:
+                continue
+            if note.pitch > lead.pitch + 12:
+                continue
+            # Lower bass, compact accompaniment, then performed accent.
+            distance = note.pitch if role == "bass" else abs(note.pitch - lead.pitch)
+            candidates.append((order[role], note.start_ms, distance, -note.velocity,
+                               note.track_index, note.channel, note.pitch, note.end_ms, note, role))
+    support = []
+    capacity = collisions = 0
+    for *_, note, role in sorted(candidates, key=lambda item: item[:8]):
+        if pitches[note.pitch].voices(note):
+            collisions += 1
+            continue
+        if layers <= 1 or timeline.voices(note) >= layers or role_timelines[role].voices(note):
+            capacity += 1
+            continue
+        support.append(note)
+        timeline.voices(note, add=True)
+        pitches[note.pitch].voices(note, add=True)
+        role_timelines[role].voices(note, add=True)
+    support.sort(key=lambda n: (n.start_ms, n.pitch, n.track_index, n.channel, n.end_ms, -n.velocity))
+    return ContextualArrangement(tuple(leads), tuple(support), capacity, collisions, 0, timeline.maximum[0])

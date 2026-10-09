@@ -1,5 +1,14 @@
 # MusicalScumme Durable Decisions
 
+## 2026-10-06 — Treat stems before recovering quiet notes
+
+- Keep UVR separation, learned vocal de-echo/dereverb and blended denoise in the isolated UVR worker. Preserve raw separated WAVs, exact stereo frame alignment and a complete provenance receipt; requested treatment must not reuse an older untreated pass.
+- Use vocal cleanup models on vocals only. Preserve instrumental details rather than remove source instruments with a singing-specific dereverb model. Keep separation-only and dereverb-only comparisons available.
+- Explicitly override the pinned library's segment setting to 256 frames; its default otherwise silently uses 801. Keep the best preset's three aligned offsets and overlapping windows. Segment length is a memory/quality tradeoff, recorded in provenance.
+- Release each model before loading the next. A failed treatment preserves raw stems and previous cleaned outputs, invalidates any old success receipt, and never reports completion.
+- Quiet-note recovery remains a separate audio-checked transcription option. Strong measured periodicity and local RMS may recover quiet vocal phrases; brief stable non-octave changes and audio-supported reattacks remain eligible. Backing recovery keeps existing model pitches and attacks only, with persistent spectral support and conservative harmonic rejection.
+- Preserve native model MIDI and keep source transcription independent of SCUM arrangement, transpose, voice ceilings and keyboard planning. Execution, note counts and synthetic regressions do not establish musical accuracy.
+
 Project-wide durable constraints and historical decisions are recorded in `PROJECT_CONTEXT.md`. Add dated entries here when a task creates or changes an architecture, public API, file layout, fallback, UI constraint, input mapping, performance strategy, dependency, or bug-prevention rule.
 
 ## 2026-07-13 — Isolate packaged audio child processes

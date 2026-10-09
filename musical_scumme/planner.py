@@ -11,6 +11,7 @@ from .arranger import SoloSegment, arrange_notes
 from .config import AppSettings
 from .instrument_profiles import resolve_instrument_profile
 from .model import KeyBindingProfile, KeyEvent, MidiNote, PlannedNote, PlaybackPlan, midi_note_name
+from .performance_phrasing import FluidPhrasingStats, apply_fluid_phrasing
 from .score_optimizer import NoteAnalysis, optimal_settings_for_notes
 
 OCTAVE_BANK_TAP_HOLD_MS = 18.0
@@ -1275,6 +1276,7 @@ class _PlannedTiming:
     sustain_reduction_ms: float
     effective_min_hold_ms: float
     effective_max_hold_ms: float
+    fluid_phrasing: FluidPhrasingStats
 
 
 @dataclass(frozen=True, slots=True)
@@ -1331,6 +1333,8 @@ def _build_planned_timing(
         key=lambda group_id: min(item.source.start_ms for item in grouped_candidates[group_id]),
     )
     notes: list[PlannedNote] = []
+    phrasing_sources: list[MidiNote] = []
+    phrasing_leads: set[int] = set()
     group_ids: list[int] = []
     group_modifiers: dict[int, int] = {}
     instrument = resolve_instrument_profile(settings.target_instrument)
@@ -1420,7 +1424,23 @@ def _build_planned_timing(
                 )
             )
             group_ids.append(group_id)
+            if settings.fluid_phrasing:
+                phrasing_sources.append(item.source)
+                if item.is_lead or item.is_solo:
+                    phrasing_leads.add(len(notes) - 1)
 
+    fluid_stats = FluidPhrasingStats()
+    if settings.fluid_phrasing:
+        notes, fluid_stats = apply_fluid_phrasing(
+            notes, phrasing_sources, phrasing_leads,
+            strength=settings.fluid_phrasing,
+            speed=settings.speed,
+            minimum_hold_ms=physical_min_hold_ms,
+            maximum_hold_ms=effective_max_hold_ms,
+            key_gap_ms=settings.key_retrigger_gap_ms,
+            instrument=instrument.key,
+            max_polyphony=settings.max_polyphony,
+        )
     group_starts = _group_starts(notes, group_ids)
     transition_delays = 0
     transition_delay_ms = 0.0
@@ -1485,6 +1505,7 @@ def _build_planned_timing(
         sustain_reduction_ms=sustain_reduction_ms,
         effective_min_hold_ms=effective_min_hold_ms,
         effective_max_hold_ms=effective_max_hold_ms,
+        fluid_phrasing=fluid_stats,
     )
 
 
@@ -1700,6 +1721,7 @@ def build_playback_plan(
                 "effective_mapping_mode": settings.mapping_mode,
                 "effective_max_polyphony": settings.max_polyphony,
                 "effective_speed": settings.speed,
+                **(FluidPhrasingStats().diagnostics(settings.fluid_phrasing) if settings.fluid_phrasing else {}),
             },
         )
 
@@ -1900,6 +1922,15 @@ def build_playback_plan(
         ),
     )
     planned = timing.notes
+    if settings.fluid_phrasing:
+        fluid = timing.fluid_phrasing
+        warnings.append(
+            f"Fluid phrasing {settings.fluid_phrasing}% shaped {fluid.phrase_count:,} phrase(s), "
+            f"connected {fluid.connected_notes:,} lead hold(s), and moved {fluid.shifted_groups:,} "
+            f"ensemble attack group(s) by at most {fluid.max_shift_ms:.1f} ms. "
+            "Phrase endpoints, written pitches and source MIDI are preserved; key and octave-bank "
+            "safety can shorten these holds or delay physically impossible attacks."
+        )
     if timing.transition_delays:
         warnings.append(
             f"Delayed {timing.transition_delays:,} modifier/retrigger timing group(s) by "
@@ -2083,6 +2114,8 @@ def build_playback_plan(
             contextual_phrase_resets=arrangement.contextual_phrase_resets,
             contextual_peak_voices_before_density=arrangement.contextual_peak_voices,
         )
+    if settings.fluid_phrasing:
+        diagnostics.update(timing.fluid_phrasing.diagnostics(settings.fluid_phrasing))
     if settings.mapping_mode == "match3_adaptive":
         exact = sum(
             note.mapped_pitch == max(0, min(127, note.source_pitch + mapping_settings.transpose))

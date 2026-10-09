@@ -241,6 +241,9 @@ class AppSettings:
     arrangement_lead_track: int = -1
     window_on_top: bool = False
     ui_mode: str = "simple"  # simple | advanced
+    # Independent of performance presets; zero preserves the original timing.
+    auto_lyrics: bool = True
+    fluid_phrasing: int = 0  # 0..100
 
     def resolved_profile(self) -> KeyBindingProfile:
         if self.profile_name == "Custom":
@@ -258,6 +261,11 @@ class AppSettings:
         return BUILTIN_PROFILES.get(migrated_name, CURRENT_SCUM_PROFILE)
 
     def normalize(self) -> None:
+        self.auto_lyrics = self.auto_lyrics if isinstance(self.auto_lyrics, bool) else True
+        try:
+            self.fluid_phrasing = max(0, min(100, int(self.fluid_phrasing)))
+        except (TypeError, ValueError, OverflowError):
+            self.fluid_phrasing = 0
         try:
             self.arrangement_lead_track = max(-1, int(self.arrangement_lead_track))
         except (TypeError, ValueError, OverflowError):

@@ -26,6 +26,8 @@ class ArrangementRecipe:
 
 
 ARRANGEMENT_RECIPES = {
+    "cover_riff": ArrangementRecipe("Cover song · Riff first / 3", "Protects vocal melody and gives guitar riffs priority over bass and pads. Follows instrumental lead parts in vocal rests, including overlapping fast solo attacks.", "vocal", 3, "cover_riff", "contextual"),
+    "cover_song": ArrangementRecipe("Cover song · Vocal + band / 3", "Combines a vocal or chosen lead with separate bass and rhythm pools; reserves rhythmic attacks before sustained harmony. Instrumental melody fills lead rests. Select all useful musical tracks.", "vocal", 3, "cover", "contextual"),
     "vocal_director": ArrangementRecipe("Performance · Vocal director / 3", "Vocal-led arrangement with full-duration voice budgeting, future melody collision checks and phrase-aware support continuity.", "vocal", 3, "warm", "contextual"),
     "vocal_director_pulse": ArrangementRecipe("Performance · Vocal rhythm / 3", "Protects vocal sustains with short, accented source accompaniment and full-duration voice budgeting.", "vocal", 3, "pulse", "contextual"),
     "chamber_director": ArrangementRecipe("Performance · Chamber director / 3", "Inferred or chosen lead with duration-aware bass and sustained harmony; protects instrumental fills between lead phrases.", "auto", 3, "warm", "contextual"),

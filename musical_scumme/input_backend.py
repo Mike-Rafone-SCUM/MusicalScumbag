@@ -645,11 +645,6 @@ def numpad_key_pressed(digit: int) -> bool:
     return check_key_pressed_edge(0x60 + digit)
 
 
-def numpad_divide_pressed() -> bool:
-    """Return whether Numpad / (VK_DIVIDE 0x6F) experienced a new press edge."""
-    return check_key_pressed_edge(0x6F)
-
-
 def virtual_key_pressed(vk: int) -> bool:
     """Return whether the virtual key experienced a new press edge (transitioned from up to down)."""
     return check_key_pressed_edge(vk)

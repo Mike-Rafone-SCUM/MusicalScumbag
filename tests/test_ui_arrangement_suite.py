@@ -78,3 +78,20 @@ def test_suite_override_clears_on_deselection_and_different_source(suite_window,
     window.load_file(str(second))
     assert window.arrangement_lead_combo.currentData() == -1
     assert window.settings.arrangement_lead_track == -1
+
+
+def test_cover_mode_is_available_and_prepares_with_layer_explanation(suite_window, tmp_path):
+    window = suite_window
+    path = tmp_path / "cover.mid"
+    _write_song(path)
+    window.load_file(str(path))
+    window._set_all_tracks(True)
+    index = window.arrangement_combo.findData("cover_song")
+    assert index >= 0
+    window.arrangement_combo.setCurrentIndex(index)
+    assert window.performance_combo.currentData() == "custom"
+    assert window.arrangement_lead_combo.isEnabled()
+    window._save_ui_to_settings()
+    assert window.settings.arrangement_mode == "cover_song"
+    assert window.prepare_plan()
+    assert any("Cover source layers" in warning for warning in window.plan.warnings)

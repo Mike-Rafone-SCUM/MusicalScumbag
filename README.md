@@ -1,8 +1,25 @@
-﻿# MusicalScumbag 3.9.0
+# MusicalScumbag 3.9.4
+
+[Download the Windows executable](https://github.com/Mike-Rafone-SCUM/MusicalScumbag/releases/tag/v3.9.4). Keep your existing settings when updating. Optional audio models and runtimes are installed separately from the app.
 
 MusicalScumbag converts MIDI into a deterministic, auditable SCUM instrument score, and can route a user-played MIDI keyboard to a SCUM instrument in real time. It sends ordinary supervised keyboard input only while SCUM is in the foreground. It does not inject into the game, read game memory, automate gameplay, or edit game files.
 
 The primary workflow uses the untouched `.mid` or `.midi` file downloaded from MIDI Find or another score source. MusicalScumbag never rewrites the imported source file.
+
+## Audio transcription
+
+UVR treatment offers **Separation only**, **De-echo / dereverb**, and **Full treatment**. Full treatment follows the aligned multi-pass BS-RoFormer separation with learned vocal echo/reverb removal and gentle denoising. The vocal cleanup models are trained for singing: instrumental audio is preserved rather than passed through a vocal dereverb model. Both synchronized stems remain available, and `.raw.wav` siblings preserve the untreated separation. First use downloads the extra weights into the separate UVR model cache. A provenance record identifies the source, separation quality, treatment and outputs; older untreated stems cannot silently bypass requested cleanup.
+
+**Recover quiet / short notes** is available with Audio-checked stems. It requires measured pitch/spectral evidence before admitting quiet notes and shorter confirmed vocal changes. Native model MIDI remains available for comparison. Cleanup can remove useful sound, and more sensitive detection can retain false notes; audition both the cleaned stems and the vocal/backing MIDI separately before choosing a result.
+
+Song Transposer includes optional UVR stem separation and isolated transcription tools. Install or repair **YourMT3+** in the dialog to enable **Audio-checked stems**: CREPE tracks a single vocal fundamental while YourMT3+ provides backing candidates. Competing harmonic templates screen backing pitches against the actual instrumental WAV, reject many overtone predictions, and consolidate duplicate unisons across guessed instrument classes. The prepared MIDI contains Vocals and unlabelled Backing; guessed instruments remain in the raw comparison MIDI. Full covers require both synchronized stems. Native independent-stem and full-mix YourMT3+ comparisons, Stem-aware pYIN/Basic Pitch, and original Basic Pitch remain available.
+
+These routes bypass the older octave repair, strum consolidation and melody reduction. Audio checking measures approximate note strength, suppresses brief vocal pitch excursions, preserves measured rests, and requires audio support before using model hints for repeated vocal attacks. It cannot recover backing-vocal harmony or reproduce continuous sung pitch bends. Spectral support can miss quiet backing notes or admit false ones, particularly in distortion; it is not proof of correct transcription. Choose the playable arrangement after loading the MIDI. SCUM pitch mapping, transpose, voice limits and key timing also affect the result. Audition the vocal-only MIDI to distinguish the tune from accompaniment and playback effects.
+
+Heavy model packages and weights stay outside the executable. Installation verifies pinned source and checkpoint downloads, and tests model loading and inference. CUDA installation can need several gigabytes of disk space; the optional runtime is stored separately and can be installed on the application drive. Transcription never sends game input or edits game files. Only user-selected audio and confirmed MIDI destinations enter conversion.
+
+Upstream models: [YourMT3+](https://github.com/mimbres/YourMT3), [paper](https://arxiv.org/abs/2407.04822), [torchcrepe](https://github.com/maxrmorrison/torchcrepe). Representative MP3/WAV/M4A musical quality and current-build SCUM playback still require supervised listening.
+
 ## Conversion and playback pipeline
 
 From the moment a MIDI is imported, MusicalScumme now runs one coherent pipeline:
@@ -63,7 +80,24 @@ Choose the SCUM target instrument before preparing a plan:
 | Harmonica | 4,000 ms | Longer breath-like phrases |
 | Banjo | 1,000 ms | Short, percussive articulation |
 
-Optimal Sounding uses the selected ceiling while deriving note lengths from the score. Final planning enforces it again as a wall-clock limit after playback speed and velocity expression, so slow playback or conflicting Custom timing cannot over-sustain the instrument. Preparation changes note releases only: attacks and pitches remain source-backed. The prepared-plan summary reports how many long notes were shortened.
+Optimal Sounding uses the selected ceiling while deriving note lengths from the score. Final planning enforces it again as a wall-clock limit after playback speed and velocity expression, so slow playback or conflicting Custom timing cannot over-sustain the instrument. Instrument sustain preparation changes note releases only; optional Fluid phrasing also reshapes performance timing. Written pitches stay source-backed. The prepared-plan summary reports how many long notes were shortened.
+
+## Fluid phrasing
+
+Choose **Fluid phrasing** in either Simple or Advanced mode to reshape the prepared SCUM performance:
+
+| Level | Strength | Character |
+|---|---:|---|
+| Off | 0% | Existing arrangement and timing behavior. |
+| Gentle | 35% | Lightly connects the melody and relaxes phrase timing. |
+| Flowing | 65% | A useful first comparison for chopped or mechanical melody playback. |
+| Expressive | 100% | Stronger connected holds and phrase motion. |
+
+The lead defines phrase boundaries, including rests while accompaniment remains audible. Melody and accompaniment follow one timing curve, with the first and last attack of each phrase anchored. Movement is bounded to 24 ms and 8% of nearby attack spacing at full strength; original uneven rhythms are not quantised. Chord-roll offsets stay intact.
+
+Connected source melody receives longer played holds, while short source articulations and phrase-ending rests remain distinct. Note releases follow the phrase movement so adjacent chords stay separated. Repeated notes retain a release gap. Extensions respect the selected sustain limit and available simultaneous voices; banjo uses less connection than guitar or harmonica. SCUM's retrigger and standalone octave-bank guards run afterward and can shorten holds or delay physically impossible attacks.
+
+This is an optional playback rewrite. It never changes written pitches, adds notes, or writes to the imported MIDI. Off is the default, and changing quality presets keeps your phrasing choice. Prepare reports phrase count, connected holds, and attack movement; Score CSV and Events CSV reflect the prepared performance. Compare the same short passage with Off and Flowing under supervised playback. Automated checks cover timing and key safety; the musical result still needs an in-game audition.
 
 ## Current SCUM bindings
 
@@ -197,5 +231,19 @@ release\MusicalScumbag.exe
 - No injection, hooks, game-memory access, anti-cheat bypass, stealth, gameplay automation, or game-file changes.
 - Static tests and packaged launch checks do not prove musical quality inside the current SCUM build. A release is not **SCUM tested** until it is auditioned in-game on Windows.
 
-See [CHANGELOG.md](CHANGELOG.md), [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md), and [REGRESSION_CHECKLIST.md](REGRESSION_CHECKLIST.md) for detailed history, constraints, and validation evidence.
+Release verification: 1,100 automated tests, Ruff, source compilation, packaged-source/resource verification and an isolated Windows startup/duplicate-launch check. Current-game musical quality and representative optional MP3/WAV/M4A transcription still require supervised listening.
 
+See [CHANGELOG.md](CHANGELOG.md) for the release history and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependencies and optional models.
+
+
+### Playback lyrics
+
+**Auto lyrics** is on by default: open a MIDI and the app reuses saved lyrics, then embedded lyrics, or searches LRCLIB in the background using the filename. Clear matches are selected and saved automatically; if playback has already started, lyrics join at its current position. `Artist - Song.mid`, reversed names and underscore-separated names are supported. Ambiguous matches or unavailable lyrics leave a message and the manual option below. Uncheck **Auto lyrics** to disable online lookup; saved lyrics still work offline.
+
+Open a MIDI and click **Find lyrics**, beside **Open MIDI**. Check the song title and artist, then choose **Search online** to search [LRCLIB](https://lrclib.net/docs) for timed lyrics. Only title and artist are sent; your MIDI stays local. Select the matching recording, review its preview, and click **Use lyrics**. You can also choose **Load .lrc file** for a local UTF-8 timed lyric file.
+
+During playback, click **+ Lyrics** to expand the panel. Your lyric choice and timing adjustment are saved for this MIDI and work offline afterward. Reopen **Find lyrics** while stopped to change them. Positive adjustment values display lyrics later; negative values earlier, before playback speed. MIDI arrangements can have different intros or tempos from a recording, so an offset cannot correct every structural difference.
+
+The karaoke panel shows a large current phrase with a green highlight, the previous phrase, two upcoming phrases, a line progress bar and a countdown during lyric gaps. MIDI syllables are grouped into full phrases so you can read ahead. Enhanced LRC word timestamps are preserved. **WORD SYNC** uses supplied word/syllable timing; **LINE SYNC** estimates the highlight between line timestamps. Pause, seek and repeat follow the playback clock.
+
+Embedded lyrics remain the fallback when no external lyrics have been chosen. Pause, seek, speed, selected sections and repeat share the playback clock. Searches without timed results show a clear message rather than inventing timings.

@@ -2,3 +2,5 @@
 pytest>=8,<9
 pyinstaller>=6.8,<7
 ruff>=0.12,<1
+numpy>=1.26,<3
+soundfile>=0.13,<1

@@ -16,6 +16,8 @@ settings.json
 settings.json.bak
 *.zip
 release-staging/
+release/lyrics/
+release/*.verification.json
 AGENTS.md
 PROJECT_CONTEXT.md
 REGRESSION_CHECKLIST.md

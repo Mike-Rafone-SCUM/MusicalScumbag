@@ -1,3 +1,24 @@
+## 3.9.4 — 2026-10-06
+
+- Add selectable UVR vocal de-echo/dereverb and gentle learned denoise after aligned multi-pass stem separation. Preserve untreated stems and record treatment provenance to prevent accidental reuse of older raw-only passes.
+- Add audio-supported quiet/short-note recovery to isolated audio-checked transcription, retaining native MIDI comparisons and independent SCUM preparation.
+- Preserve Cover Song, lyrics, Fluid phrasing and manually supervised playback.
+- Public release verified on 2026-10-09: 1,100 automated tests, Ruff, compilation, frozen source/resource checks and Windows startup/duplicate-launch smoke checks passed. Current-game musical audition and representative MP3/WAV/M4A transcription quality remain unverified.
+
+## 3.9.3 — 2026-10-03
+
+- Restore Cover song · Vocal + band and Cover song · Riff first from the current primary project, together with its lyric, karaoke and optional transcription workflows.
+- Preserve Fluid phrasing and the removal of automatic W output; package the latest source and optional worker resources together.
+
+## 3.9.2 — 2026-10-03
+
+- Remove the legacy Numpad / auto-walk handler that could press and hold W during musical playback; retain playback, seek, window and emergency-stop shortcuts.
+- Add optional Fluid phrasing in Simple and Advanced: Gentle, Flowing and Expressive.
+- Reshape complete phrases with anchored endpoints and shared ensemble timing; connect source melody while preserving short articulations and phrase rests.
+- Bound movement, respect sustain and voice limits, and apply normal repeated-key and octave-bank guards afterward.
+- Preserve imported MIDI and existing plans when phrasing is Off; retain the chosen strength across quality presets.
+- Report phrasing in preparation and add engine, physical-safety, settings and offscreen UI regressions. Current-game musical audition remains pending.
+
 ## 3.9.1 — 2026-09-23
 
 - Prevent duplicate UI/hotkey instances while the player is hidden or visible.

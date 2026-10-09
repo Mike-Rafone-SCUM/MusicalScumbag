@@ -11,6 +11,7 @@ from typing import Iterable
 from .arrangement_options import ARRANGEMENT_RECIPES, ArrangementRecipe
 from .arrangement_processing import process_contextual_arrangement
 from .config import AppSettings
+from .cover_layers import infer_cover_layers
 from .gm import describe_program
 from .model import MidiNote
 
@@ -1256,14 +1257,29 @@ def _suite_arrangement(
     groups = _group_onsets(working, settings.onset_group_ms)
     # Forced candidates retain phrase optimization within a polyphonic lead
     # track while preventing a loud orchestral layer from stealing its attack.
+    is_cover = recipe.texture in {"cover", "cover_riff"}
+    roles = infer_cover_layers(working, primary, names) if is_cover else None
     candidates = []
     for group in groups:
         owned = [n for n in group if n.track_index == preferred]
-        candidates.append(owned or group)
+        alternatives = group
+        if roles is not None:
+            fills = [n for n in group if roles[n.track_index] == "fill"]
+            riffs = [n for n in group if roles[n.track_index] == "rhythm"]
+            alternatives = fills or riffs or group
+        candidates.append(owned or alternatives)
     path = _trace_melody_path(candidates, profiles, names)
     limit = min(recipe.layers, settings.max_polyphony)
     if recipe.processing == "contextual":
-        processed = process_contextual_arrangement(groups, path.notes, primary, limit, recipe.texture)
+        processed = process_contextual_arrangement(groups, path.notes, primary, limit, recipe.texture, roles)
+        if roles is not None:
+            warnings.append("Cover source layers (inferred): " + "; ".join(
+                f"{names.get(track, f'Track {track}')} = {role}" for track, role in sorted(roles.items())
+            ) + (". Rhythm reserves space before bass and harmony; missing parts are not generated."
+                 if recipe.texture == "cover_riff" else
+                 ". Bass and rhythm reserve space before harmony; missing parts are not generated."))
+            if preferred >= 0 and set(re.findall(r"[a-z0-9]+", names.get(primary, "").casefold())) & {"backing", "background", "choir", "harmony"}:
+                warnings.append("Chosen lead is labelled as backing/harmony. Use Lead track to choose the main singer if it has an unfamiliar name.")
         selected = [_Selected(n, 5.0 + n.velocity / 127.0, "melody") for n in processed.leads]
         selected.extend(_Selected(n, 0.6 + n.velocity / 254.0, "harmony") for n in processed.support)
         selected.sort(key=lambda item: (item.note.start_ms, item.note.pitch, item.note.track_index))

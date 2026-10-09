@@ -58,6 +58,14 @@ class MidiTrack:
         return f"{midi_note_name(self.min_pitch)}–{midi_note_name(self.max_pitch)}"
 
 
+@dataclass(frozen=True, slots=True)
+class MidiLyric:
+    time_ms: float
+    text: str
+    # Character offset and absolute source timestamp for timed words/syllables.
+    word_times: tuple[tuple[int, float], ...] = ()
+
+
 @dataclass(slots=True)
 class MidiProject:
     path: Path
@@ -67,6 +75,7 @@ class MidiProject:
     duration_ms: float
     first_bpm: float
     warnings: tuple[str, ...] = ()
+    lyrics: tuple[MidiLyric, ...] = ()
 
     def notes_for_tracks(self, selected_tracks: Iterable[int]) -> list[MidiNote]:
         selected = set(int(i) for i in selected_tracks)

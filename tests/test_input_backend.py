@@ -79,16 +79,6 @@ def test_check_key_pressed_edge_detects_transitions(monkeypatch):
     assert ib.check_key_pressed_edge(test_vk)
 
 
-def test_numpad_divide_pressed_calls_check_key_pressed_edge(monkeypatch):
-    import musical_scumme.input_backend as ib
-
-    called_vk = []
-    monkeypatch.setattr(ib, "check_key_pressed_edge", lambda vk: called_vk.append(vk) or True)
-
-    assert ib.numpad_divide_pressed() is True
-    assert called_vk == [0x6F]
-
-
 def test_is_control_down_checks_vk_control(monkeypatch):
     import musical_scumme.input_backend as ib
 

@@ -1,5 +1,6 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
+    [switch]$OneFile,
     [switch]$CleanEnvironment,
     [string]$OutputRoot
 )
@@ -72,7 +73,7 @@ $distRoot = if ($OutputRoot) {
     [System.IO.Path]::GetFullPath($OutputRoot)
 }
 else {
-    Join-Path $PSScriptRoot 'dist'
+    Join-Path $PSScriptRoot 'release'
 }
 $workDir = if ($OutputRoot) { Join-Path $PSScriptRoot ("build\" + (Split-Path -Leaf $distRoot)) } else { Join-Path $PSScriptRoot 'build\MusicalScumbag' }
 Remove-Item -LiteralPath $workDir, $distRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -94,10 +95,32 @@ try {
     --paths $PSScriptRoot `
     --additional-hooks-dir "$PSScriptRoot\packaging_hooks" `
     --hidden-import rtmidi `
+    --add-data "$PSScriptRoot\audio_worker.py;." `
+    --add-data "$PSScriptRoot\advanced_worker.py;." `
+    --add-data "$PSScriptRoot\audio_evidence.py;." `
+    --add-data "$PSScriptRoot\install_advanced_tools.ps1;." `
+    --add-data "$PSScriptRoot\download_advanced_model.py;." `
+    --add-data "$PSScriptRoot\requirements-advanced.txt;." `
+    --add-data "$PSScriptRoot\install_audio_tools.ps1;." `
+    --add-data "$PSScriptRoot\requirements-audio.txt;." `
+    --add-data "$PSScriptRoot\requirements-audio-constraints.txt;." `
+    --add-data "$PSScriptRoot\validate_audio_runtime.py;." `
+    --add-data "$PSScriptRoot\separation_worker.py;." `
+    --add-data "$PSScriptRoot\install_separation_tools.ps1;." `
+    --add-data "$PSScriptRoot\requirements-separation.txt;." `
+    --add-data "$PSScriptRoot\requirements-separation-cuda.txt;." `
+    --add-data "$PSScriptRoot\validate_separation_runtime.py;." `
     --exclude-module PySide6.QtWebEngineCore `
     --exclude-module PySide6.QtWebEngineWidgets `
     --exclude-module PySide6.QtPdf `
     --exclude-module PySide6.QtPdfWidgets `
+    --exclude-module torch `
+    --exclude-module torchcrepe `
+    --exclude-module tensorflow `
+    --exclude-module basic_pitch `
+    --exclude-module librosa `
+    --exclude-module numpy `
+    --exclude-module soundfile `
     --exclude-module PySide6.QtNetwork `
     run.py
 
@@ -107,5 +130,10 @@ finally {
     $env:PATH = $originalBuildPath
 }
 
-
 Write-Host "Built: $distRoot\MusicalScumbag.exe"
+
+$targetExe = Join-Path $distRoot 'MusicalScumbag.exe'
+if (Test-Path -LiteralPath $targetExe) {
+    $hash = (Get-FileHash -LiteralPath $targetExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath "$targetExe.sha256" -Value "$hash  MusicalScumbag.exe" -Encoding ascii
+}

@@ -8,7 +8,7 @@ from typing import Iterable
 import mido
 
 from .gm import describe_program
-from .model import MidiNote, MidiProject, MidiTrack
+from .model import MidiLyric, MidiNote, MidiProject, MidiTrack
 
 INVALID_DATA_BYTE_ERROR = "data byte must be in range 0..127"
 CLIPPED_DATA_BYTE_WARNING = (
@@ -125,6 +125,8 @@ def load_midi(path: str | Path) -> MidiProject:
             tick_ms_cache[tick] = cached
         return cached
 
+    lyrics_by_track: dict[int, list[MidiLyric]] = defaultdict(list)
+    karaoke_events: list[MidiLyric] = []
     all_notes: list[MidiNote] = []
     track_summaries: list[MidiTrack] = []
     pitch_bend_events = 0
@@ -171,6 +173,10 @@ def load_midi(path: str | Path) -> MidiProject:
             absolute_tick += int(message.time)
 
             if message.is_meta:
+                if message.type == "lyrics":
+                    lyrics_by_track[track_index].append(MidiLyric(tick_to_ms(absolute_tick), message.text))
+                elif message.type == "text":
+                    karaoke_events.append(MidiLyric(tick_to_ms(absolute_tick), message.text))
                 if message.type == "track_name" and message.name.strip():
                     track_name = message.name.strip()
                 continue
@@ -353,6 +359,11 @@ def load_midi(path: str | Path) -> MidiProject:
             "SCUM has no continuous pitch-bend control, so MusicalScumme preserves the written note "
             "attacks but cannot reproduce those bends."
         )
+    # Parallel lead/backing lyric tracks must not interleave into one sentence.
+    # Prefer the authored stream containing the most lyric text; ties keep track order.
+    lyric_events = max(lyrics_by_track.values(), key=lambda events: sum(
+        len(event.text.strip()) for event in events if not event.text.startswith("@")
+    ), default=[])
     return MidiProject(
         path=midi_path,
         ticks_per_beat=midi.ticks_per_beat,
@@ -361,6 +372,12 @@ def load_midi(path: str | Path) -> MidiProject:
         duration_ms=duration_ms,
         first_bpm=first_bpm,
         warnings=tuple(project_warnings),
+        lyrics=tuple(sorted(
+            lyric_events or (karaoke_events if any(
+                event.text.startswith("@KMIDI") for event in karaoke_events
+            ) else []),
+            key=lambda event: event.time_ms,
+        )),
     )
 
 

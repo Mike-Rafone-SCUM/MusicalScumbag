@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QTime, QTimer, Signal
+from PySide6.QtCore import QObject, QProcess, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -40,7 +43,19 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
+from .advanced_tools import advanced_runtime_dir, advanced_tools_status, advanced_worker_command
 from .arrangement_options import ARRANGEMENT_OPTIONS, ARRANGEMENT_RECIPES, CHORD_RECOGNITION_MODES
+from .audio_tools import (
+    AUDIO_EXTENSIONS,
+    AUDIO_PITCH_FOCUS_RANGES,
+    RECOMMENDED_FRAME_THRESHOLD,
+    RECOMMENDED_MINIMUM_NOTE_MS,
+    RECOMMENDED_ONSET_THRESHOLD,
+    audio_tools_status,
+    audio_worker_command,
+    resource_path,
+)
+from .auto_lyrics import AutoLyrics
 from .config import (
     BUILTIN_PROFILES,
     CUSTOM_MAX_CHORD_SPREAD_MS,
@@ -49,6 +64,7 @@ from .config import (
     MAX_RECENT_MIDI_FILES,
     PERFORMANCE_PRESETS,
     AppSettings,
+    app_data_dir,
     apply_performance_preset,
     create_default_settings,
     load_settings,
@@ -56,17 +72,16 @@ from .config import (
 )
 from .input_backend import (
     create_backend,
-    emergency_stop_pressed,
     focus_scum_window,
     foreground_scum_window_rect,
     foreground_window_info,
     function_key_pressed,
     is_control_down,
     key_name_to_vk,
-    numpad_divide_pressed,
     numpad_key_pressed,
 )
 from .instrument_profiles import INSTRUMENT_PROFILES, resolve_instrument_profile
+from .karaoke_view import KaraokeView
 from .live_midi import (
     LiveMidiCallbacks,
     LiveMidiConfig,
@@ -76,6 +91,9 @@ from .live_midi import (
     MidiInputUnavailable,
     RtMidiInputProvider,
 )
+from .lyric_sources import load_saved_lyrics, parse_lrc, save_lyrics
+from .lyrics import LyricTimeline, lyric_cues
+from .lyrics_dialog import LyricsDialog
 from .midi_engine import load_midi
 from .model import MidiNote, PlaybackPlan, midi_note_name
 from .numeric_widgets import QDoubleSpinBox, QSpinBox
@@ -91,9 +109,21 @@ from .playback_sections import (
 )
 from .scheduler import PlaybackScheduler, SchedulerCallbacks
 from .score_optimizer import ProjectAnalysis, analyse_notes, analyse_project
+from .separation_tools import (
+    reusable_stems,
+    separation_output_paths,
+    separation_stem_paths,
+    separation_tools_status,
+    separation_worker_command,
+)
+from .stem_merger import write_cover_midi
+from .transcription_export import copy_source_midi
 
 APP_TITLE = f"MusicalScumbag {__version__}"
+MIDI_EXTENSIONS = {".mid", ".midi"}
 logger = logging.getLogger("musical_scumme.ui")
+
+FLUID_PHRASING_OPTIONS = (("Off", 0), ("Gentle", 35), ("Flowing", 65), ("Expressive", 100))
 
 
 def _selection_is_prepared_song(project, selected_tracks: list[int]) -> bool:
@@ -120,6 +150,29 @@ def _fit_combo_to_panel(combo: QComboBox, minimum_contents_length: int = 18) -> 
     combo.setMinimumContentsLength(minimum_contents_length)
 
 
+def _fluid_phrasing_combo() -> QComboBox:
+    combo = QComboBox()
+    for label, strength in FLUID_PHRASING_OPTIONS:
+        combo.addItem(label, strength)
+    _fit_combo_to_panel(combo, 14)
+    _describe_control(
+        combo,
+        "Fluid phrasing",
+        "Connect melody notes and add subtle phrase timing while preserving rests. "
+        "Applies to prepared SCUM playback; your original MIDI stays untouched. "
+        "This preference stays selected when you change quality presets.",
+    )
+    return combo
+
+
+def _select_fluid_phrasing(combo: QComboBox, strength: int) -> None:
+    index = combo.findData(strength)
+    if index < 0:
+        combo.addItem(f"Custom ({strength}%)", strength)
+        index = combo.count() - 1
+    combo.setCurrentIndex(index)
+
+
 def _set_visual_state(widget: QWidget, object_name: str) -> None:
     """Change a dynamic style state and immediately refresh its Qt polish."""
 
@@ -135,6 +188,20 @@ def _describe_control(widget: QWidget, name: str, description: str) -> None:
     widget.setAccessibleDescription(description)
     if not widget.toolTip():
         widget.setToolTip(description)
+
+
+def _read_process_text(process: QProcess, *, stderr: bool = False) -> str:
+    data = process.readAllStandardError() if stderr else process.readAllStandardOutput()
+    return bytes(data).decode("utf-8", errors="replace")
+
+
+def _terminate_process_tree(process: QProcess) -> None:
+    """Terminate an asynchronous worker and its Windows child-process tree."""
+
+    process_id = int(process.processId())
+    if os.name == "nt" and process_id > 0:
+        QProcess.startDetached("taskkill.exe", ["/PID", str(process_id), "/T", "/F"])
+    process.kill()
 
 
 def _apply_native_dark_titlebar(window: QWidget) -> None:
@@ -400,8 +467,29 @@ QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTimeEdi
   border-color: #9a895e;
   background: #232323;
 }
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QTimeEdit:disabled {
+  background: #181818;
+  color: #555555;
+  border-color: #2b2b2b;
+}
 QLineEdit#trackFilter { background: #1d1d1d; }
-QComboBox::drop-down { border: none; width: 20px; }
+QComboBox::drop-down {
+  subcontrol-origin: padding;
+  subcontrol-position: top right;
+  width: 22px;
+  border: none;
+}
+QComboBox::down-arrow {
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid #a0a0a0;
+  width: 0px;
+  height: 0px;
+  margin-right: 6px;
+}
+QComboBox::down-arrow:disabled {
+  border-top-color: #404040;
+}
 QComboBox QAbstractItemView {
   background: #202020;
   color: #e1e1dc;
@@ -779,6 +867,1455 @@ class MappingComparisonDialog(QDialog):
         self.accept()
 
 
+class AudioConvertDialog(QDialog):
+    """Optional isolated audio-to-MIDI transcription workflow."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Audio to MIDI")
+        _apply_native_dark_titlebar(self)
+        self.setMinimumSize(650, 520)
+        self.converted_path: Path | None = None
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+        self.process.readyReadStandardOutput.connect(self._read_stdout)
+        self.process.readyReadStandardError.connect(self._read_stderr)
+        self.process.started.connect(self._process_started)
+        self.process.errorOccurred.connect(self._process_error)
+        self.process.finished.connect(self._process_finished)
+        self._process_kind = ""
+        self._had_process_error = False
+        self._build_ui()
+        self._refresh_runtime_status()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        title_label = QLabel("AUDIO TO MIDI")
+        title_label.setObjectName("dialogTitle")
+        layout.addWidget(title_label)
+        intro = QLabel(
+            "Convert MP3, WAV, FLAC, OGG or M4A into MIDI using Spotify Basic Pitch. "
+            "It works best on a clean single instrument or vocal stem; a full mixed song is an approximation."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("subtitle")
+        layout.addWidget(intro)
+
+        runtime_box = QGroupBox("Audio transcription runtime")
+        runtime_layout = QHBoxLayout(runtime_box)
+        self.runtime_label = QLabel()
+        self.runtime_label.setWordWrap(True)
+        self.install_button = QPushButton("Install audio tools")
+        self.install_button.setObjectName("secondary")
+        self.install_button.clicked.connect(self.install_runtime)
+        runtime_layout.addWidget(self.runtime_label, 1)
+        runtime_layout.addWidget(self.install_button)
+        layout.addWidget(runtime_box)
+
+        files_box = QGroupBox("Files")
+        files_form = QFormLayout(files_box)
+        input_row = QHBoxLayout()
+        self.input_edit = QLineEdit()
+        self.input_edit.setPlaceholderText("Choose an audio file…")
+        input_button = QPushButton("Browse")
+        self.input_button = input_button
+        input_button.setObjectName("secondary")
+        input_button.clicked.connect(self.browse_input)
+        input_row.addWidget(self.input_edit, 1)
+        input_row.addWidget(input_button)
+        files_form.addRow("Audio", input_row)
+        output_row = QHBoxLayout()
+        self.output_edit = QLineEdit()
+        self.output_edit.setPlaceholderText("Output .mid file…")
+        output_button = QPushButton("Browse")
+        self.output_button = output_button
+        output_button.setObjectName("secondary")
+        output_button.clicked.connect(self.browse_output)
+        output_row.addWidget(self.output_edit, 1)
+        output_row.addWidget(output_button)
+        files_form.addRow("MIDI output", output_row)
+        layout.addWidget(files_box)
+
+        tuning_box = QGroupBox("Transcription tuning")
+        tuning_form = QFormLayout(tuning_box)
+        self.onset_spin = QDoubleSpinBox()
+        self.onset_spin.setRange(0.10, 0.90)
+        self.onset_spin.setSingleStep(0.05)
+        self.onset_spin.setDecimals(2)
+        self.onset_spin.setValue(RECOMMENDED_ONSET_THRESHOLD)
+        self.onset_spin.setToolTip("Higher values reject more weak or uncertain note attacks.")
+        tuning_form.addRow("Onset confidence", self.onset_spin)
+        self.frame_spin = QDoubleSpinBox()
+        self.frame_spin.setRange(0.10, 0.90)
+        self.frame_spin.setSingleStep(0.05)
+        self.frame_spin.setDecimals(2)
+        self.frame_spin.setValue(RECOMMENDED_FRAME_THRESHOLD)
+        self.frame_spin.setToolTip("Higher values reject more quiet sustained note frames.")
+        tuning_form.addRow("Frame confidence", self.frame_spin)
+        self.audio_min_note_spin = QSpinBox()
+        self.audio_min_note_spin.setRange(20, 1000)
+        self.audio_min_note_spin.setValue(RECOMMENDED_MINIMUM_NOTE_MS)
+        self.audio_min_note_spin.setSuffix(" ms")
+        tuning_form.addRow("Minimum note", self.audio_min_note_spin)
+        self.pitch_focus_combo = QComboBox()
+        for focus_name, (label, _minimum, _maximum) in AUDIO_PITCH_FOCUS_RANGES.items():
+            self.pitch_focus_combo.addItem(label, focus_name)
+        tuning_form.addRow("Pitch focus", self.pitch_focus_combo)
+        layout.addWidget(tuning_box)
+        self.tuning_box = tuning_box
+
+        self.form_status_label = QLabel("Choose an audio source to begin.")
+        self.form_status_label.setWordWrap(True)
+        self.form_status_label.setAccessibleName("Audio conversion readiness")
+        _set_visual_state(self.form_status_label, "inlineIdle")
+        layout.addWidget(self.form_status_label)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        layout.addWidget(self.progress)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(300)
+        layout.addWidget(self.log, 1)
+
+        buttons = QHBoxLayout()
+        self.convert_button = QPushButton("Convert and load MIDI")
+        _describe_control(
+            self.convert_button,
+            "Convert audio and load MIDI",
+            "Transcribe the selected audio in the isolated runtime, then load the resulting MIDI.",
+        )
+        self.convert_button.clicked.connect(self.convert)
+        close_button = QPushButton("Close")
+        close_button.setObjectName("secondary")
+        close_button.clicked.connect(self.reject)
+        buttons.addWidget(self.convert_button)
+        buttons.addStretch(1)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        _describe_control(
+            self.input_edit,
+            "Audio source path",
+            "A supported MP3, WAV, FLAC, OGG, or M4A source file.",
+        )
+        _describe_control(
+            self.output_edit,
+            "MIDI output path",
+            "The destination MIDI file path.",
+        )
+
+        self.input_edit.textChanged.connect(self._source_changed)
+        self.output_edit.textChanged.connect(self._refresh_action_state)
+        self._source_changed()
+
+    def _source_changed(self, *_args) -> None:
+        source = Path(self.input_edit.text().strip()).expanduser()
+        if source.suffix.lower() in AUDIO_EXTENSIONS and not self.output_edit.text().strip():
+            self.output_edit.setText(str(source.with_suffix(".transcribed.mid")))
+        self._refresh_action_state()
+
+    def _refresh_runtime_status(self) -> None:
+        status = audio_tools_status()
+        self.runtime_label.setText(status.message)
+        self.install_button.setEnabled(self.process.state() == QProcess.ProcessState.NotRunning)
+        self._refresh_action_state()
+
+    def _refresh_action_state(self) -> None:
+        if not hasattr(self, "convert_button"):
+            return
+        input_path = Path(self.input_edit.text().strip()).expanduser()
+        output_path = Path(self.output_edit.text().strip()).expanduser()
+        source_ready = input_path.is_file() and input_path.suffix.lower() in AUDIO_EXTENSIONS
+        output_ready = output_path.suffix.lower() in {".mid", ".midi"}
+        runtime_ready = audio_tools_status().available
+        running = self.process.state() != QProcess.ProcessState.NotRunning or bool(self._process_kind)
+        ready = source_ready and output_ready and runtime_ready and not running
+        self.convert_button.setEnabled(ready)
+        if running:
+            message, state = "Transcription is running…", "inlineGood"
+        elif not source_ready:
+            message, state = "Choose an existing supported MP3, WAV, FLAC, OGG or M4A file.", "inlineIdle"
+        elif not output_ready:
+            message, state = "Choose an output file path ending in .mid or .midi.", "inlineWarn"
+        elif not runtime_ready:
+            message, state = "Install the audio tools runtime before converting audio.", "inlineWarn"
+        else:
+            message, state = "Ready to transcribe. The audio file will not be modified.", "inlineGood"
+        self.form_status_label.setText(message)
+        _set_visual_state(self.form_status_label, state)
+
+    def browse_input(self) -> None:
+        filters = "Audio files (*.mp3 *.wav *.flac *.ogg *.m4a);;All files (*.*)"
+        path, _ = QFileDialog.getOpenFileName(self, "Choose audio file", str(Path.home()), filters)
+        if path:
+            self.input_edit.setText(path)
+
+    def browse_output(self) -> None:
+        default = self.output_edit.text().strip() or "output.mid"
+        path, _ = QFileDialog.getSaveFileName(self, "Save MIDI file", default, "MIDI files (*.mid *.midi)")
+        if path:
+            self.output_edit.setText(path)
+
+    def install_runtime(self) -> None:
+        if os.name != "nt":
+            QMessageBox.information(self, APP_TITLE, "The bundled audio runtime installer currently targets Windows.")
+            return
+        shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+        script = resource_path("install_audio_tools.ps1")
+        if not shell or not script.exists():
+            QMessageBox.critical(self, APP_TITLE, "PowerShell or the audio installer resource is missing.")
+            return
+        self._start_process("install", shell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)])
+
+    def convert(self) -> None:
+        input_path = Path(self.input_edit.text().strip()).expanduser()
+        output_path = Path(self.output_edit.text().strip()).expanduser()
+        if not input_path.is_file() or input_path.suffix.lower() not in AUDIO_EXTENSIONS:
+            QMessageBox.warning(self, APP_TITLE, "Choose an existing supported audio file first.")
+            return
+        if output_path.suffix.lower() not in {".mid", ".midi"}:
+            QMessageBox.warning(self, APP_TITLE, "The output filename must end in .mid or .midi.")
+            return
+        if output_path.exists():
+            answer = QMessageBox.question(
+                self,
+                APP_TITLE,
+                f"The destination MIDI already exists:\n\n{output_path.name}\n\nOverwrite it?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            focus_label, minimum_frequency, maximum_frequency = AUDIO_PITCH_FOCUS_RANGES[
+                str(self.pitch_focus_combo.currentData())
+            ]
+            program, arguments = audio_worker_command(
+                input_path,
+                output_path,
+                onset_threshold=self.onset_spin.value(),
+                frame_threshold=self.frame_spin.value(),
+                minimum_note_ms=self.audio_min_note_spin.value(),
+                minimum_frequency=minimum_frequency,
+                maximum_frequency=maximum_frequency,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, APP_TITLE, f"Could not prepare the audio conversion:\n\n{exc}")
+            return
+        self.converted_path = output_path
+        self._start_process("transcribe", program, arguments)
+
+    def _start_process(self, kind: str, program: str, arguments: list[str]) -> None:
+        if self.process.state() != QProcess.ProcessState.NotRunning:
+            return
+        self._process_kind = kind
+        self._had_process_error = False
+        self.log.clear()
+        self.progress.setRange(0, 0)
+        self.convert_button.setEnabled(False)
+        self.install_button.setEnabled(False)
+        self._refresh_action_state()
+        self.process.start(program, arguments)
+
+    def _process_started(self) -> None:
+        action = "Installation" if self._process_kind == "install" else "Transcription"
+        self.log.appendPlainText(f"{action} started…")
+
+    def _process_error(self, error: QProcess.ProcessError) -> None:
+        self._had_process_error = True
+        message = self.process.errorString() or str(error)
+        self.log.appendPlainText(f"Process error: {message}")
+        if error == QProcess.ProcessError.FailedToStart:
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            self._process_kind = ""
+            self.install_button.setEnabled(True)
+            self._refresh_action_state()
+            QMessageBox.critical(self, APP_TITLE, f"Could not start the background process:\n\n{message}")
+
+    def _read_stdout(self) -> None:
+        text = _read_process_text(self.process)
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                self.log.appendPlainText(line)
+                continue
+            event = payload.get("event")
+            if event == "status":
+                self.log.appendPlainText(str(payload.get("message", "Working…")))
+            elif event == "complete":
+                notes = int(payload.get("notes", 0))
+                self.log.appendPlainText(f"Transcription complete: {notes:,} notes detected.")
+            elif event == "error":
+                self.log.appendPlainText(f"Error: {payload.get('message', 'Unknown failure')}")
+            else:
+                self.log.appendPlainText(line)
+
+    def _read_stderr(self) -> None:
+        text = _read_process_text(self.process, stderr=True).strip()
+        if text:
+            self.log.appendPlainText(text)
+
+    def _process_finished(self, exit_code: int, status: QProcess.ExitStatus) -> None:
+        self._read_stdout()
+        self._read_stderr()
+        kind = self._process_kind
+        self._process_kind = ""
+        self._refresh_runtime_status()
+        self.progress.setRange(0, 1)
+        if exit_code != 0:
+            self.progress.setValue(0)
+            if not self._had_process_error or status != QProcess.ExitStatus.CrashExit:
+                QMessageBox.critical(self, APP_TITLE, "The background operation failed. See the log for details.")
+            return
+        self.progress.setValue(1)
+        if kind == "install":
+            QMessageBox.information(self, APP_TITLE, "Audio tools installed successfully.")
+        elif kind == "transcribe" and self.converted_path:
+            QMessageBox.information(
+                self,
+                APP_TITLE,
+                f"Audio converted successfully:\n\n{self.converted_path.name}\n\nThe MIDI will now be loaded.",
+            )
+            self.accept()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.process.state() != QProcess.ProcessState.NotRunning:
+            answer = QMessageBox.question(
+                self,
+                APP_TITLE,
+                "A conversion or installation is still running. Cancel it and close?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            _terminate_process_tree(self.process)
+            self.process.waitForFinished(1000)
+        event.accept()
+
+
+class SongTransposerDialog(QDialog):
+    """Convert audio when needed, separate stems with UVR, then build a deterministic Source MIDI."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Song Transposer")
+        _apply_native_dark_titlebar(self)
+        self.setAcceptDrops(True)
+        self.setMinimumSize(880, 720)
+        self.resize(960, 900)
+        self.processed_path: Path | None = None
+        self.is_cover_arrangement: bool = False
+        self._pending_raw_path: Path | None = None
+        self._pending_output_path: Path | None = None
+        self._pending_transcription_path: Path | None = None
+        self._vocals_raw_path: Path | None = None
+        self._inst_raw_path: Path | None = None
+        self._vocals_wav_path: Path | None = None
+        self._inst_wav_path: Path | None = None
+        self._process_kind = ""
+        self._had_process_error = False
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
+        self.process.readyReadStandardOutput.connect(self._read_stdout)
+        self.process.readyReadStandardError.connect(self._read_stderr)
+        self.process.started.connect(self._process_started)
+        self.process.errorOccurred.connect(self._process_error)
+        self.process.finished.connect(self._process_finished)
+        self._build_ui()
+        self._refresh_runtime_status()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        title_label = QLabel("SONG TRANSPOSER & STEM SEPARATION")
+        title_label.setObjectName("dialogTitle")
+        layout.addWidget(title_label)
+
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        settings_scroll.setAccessibleName("Song Transposer settings")
+        settings_content = QWidget()
+        settings_layout = QVBoxLayout(settings_content)
+        settings_layout.setContentsMargins(2, 2, 5, 2)
+        settings_layout.setSpacing(8)
+        settings_scroll.setWidget(settings_content)
+        self.settings_scroll = settings_scroll
+
+        intro = QLabel(
+            "Transcribe a song or copy an existing MIDI without game preparation. Audio-checked stems combine vocal detection, "
+            "vocal pitch tracking and backing-note evidence. Optional UVR provides the separate WAVs. "
+            "Raw model predictions and the earlier transcription methods remain available for comparison."
+        )
+        intro.setWordWrap(True)
+        intro.setObjectName("subtitle")
+        settings_layout.addWidget(intro)
+
+        runtime_box = QGroupBox("Optional audio transcription runtime (Basic Pitch)")
+        runtime_layout = QHBoxLayout(runtime_box)
+        self.runtime_label = QLabel()
+        self.runtime_label.setWordWrap(True)
+        self.install_button = QPushButton("Install / repair audio tools")
+        self.install_button.setObjectName("secondary")
+        self.install_button.clicked.connect(self.install_runtime)
+        runtime_layout.addWidget(self.runtime_label, 1)
+        runtime_layout.addWidget(self.install_button)
+        settings_layout.addWidget(runtime_box)
+
+        advanced_box = QGroupBox("Optional multi-instrument transcription (YourMT3+)")
+        advanced_layout = QHBoxLayout(advanced_box)
+        self.advanced_runtime_label = QLabel()
+        self.advanced_runtime_label.setWordWrap(True)
+        self.advanced_install_button = QPushButton("Install / repair YourMT3+")
+        self.advanced_install_button.setObjectName("secondary")
+        self.advanced_install_button.clicked.connect(self.install_advanced_runtime)
+        advanced_layout.addWidget(self.advanced_runtime_label, 1)
+        advanced_layout.addWidget(self.advanced_install_button)
+        settings_layout.addWidget(advanced_box)
+
+        separation_box = QGroupBox("Optional UVR stem separation (BS-RoFormer Viperx-1297)")
+        separation_layout = QHBoxLayout(separation_box)
+        self.separation_runtime_label = QLabel()
+        self.separation_runtime_label.setWordWrap(True)
+        self.separation_install_button = QPushButton("Install / repair UVR")
+        self.separation_install_button.setObjectName("secondary")
+        self.separation_install_button.clicked.connect(self.install_separation_runtime)
+        separation_layout.addWidget(self.separation_runtime_label, 1)
+        separation_layout.addWidget(self.separation_install_button)
+        settings_layout.addWidget(separation_box)
+
+        files_box = QGroupBox("Song files")
+        files_form = QFormLayout(files_box)
+        input_row = QHBoxLayout()
+        self.input_edit = QLineEdit()
+        self.input_edit.setPlaceholderText("Choose MP3, WAV, FLAC, OGG, M4A, MID or MIDI…")
+        input_button = QPushButton("Browse")
+        self.input_button = input_button
+        input_button.setObjectName("secondary")
+        input_button.clicked.connect(self.browse_input)
+        input_row.addWidget(self.input_edit, 1)
+        input_row.addWidget(input_button)
+        files_form.addRow("Input", input_row)
+
+        self.separate_checkbox = QCheckBox("Separate a full mix with UVR before pitch detection")
+        self.separate_checkbox.setChecked(True)
+        self.separate_checkbox.setToolTip(
+            "Creates separate vocals and instrumental WAV files, then sends only the selected stem to Basic Pitch. "
+            "Turn this off when the input is already a clean stem."
+        )
+        files_form.addRow("UVR preprocessing", self.separate_checkbox)
+
+        self.stem_combo = QComboBox()
+        self.stem_combo.addItem("Both stems · Full cover arrangement (Vocals + Band)", "both")
+        self.stem_combo.addItem("Instrumental / backing only (guitar recommended)", "instrumental")
+        self.stem_combo.addItem("Vocals / lead melody only", "vocals")
+        files_form.addRow("Stem to transcribe", self.stem_combo)
+        self.separation_quality_combo = QComboBox()
+        self.separation_quality_combo.addItem("Best · 3 aligned passes (slowest)", "best")
+        self.separation_quality_combo.addItem("Balanced · single pass", "balanced")
+        self.separation_quality_combo.addItem("Fast · reduced overlap", "fast")
+        self.separation_quality_combo.setToolTip(
+            "Best averages three time-offset predictions with greater window overlap to reduce boundary artifacts. "
+            "It takes several times longer; compare the WAV stems before transcribing. Model windows are bounded "
+            "to 256 frames to limit GPU memory; shorter windows can reduce separation quality. "
+            "Separation can leave vocal bleed. Basic Pitch cannot reliably identify every instrument in a full band."
+        )
+        files_form.addRow("Separation quality", self.separation_quality_combo)
+        self.separation_cleanup_combo = QComboBox()
+        self.separation_cleanup_combo.addItem("Full · vocal de-echo / reverb + denoise", "full")
+        self.separation_cleanup_combo.addItem("Vocals · de-echo / reverb only", "dereverb")
+        self.separation_cleanup_combo.addItem("Separation only · no learned cleanup", "none")
+        self.separation_cleanup_combo.setAccessibleName("UVR vocal cleanup")
+        self.separation_cleanup_combo.setToolTip(
+            "Learned cleanup treats vocals; the instrumental stem keeps its original separated detail. "
+            "Noise and reverb removal can also remove quiet notes or harmonies. Both raw WAV stems are kept "
+            "for comparison. Cleanup models download into the separate UVR runtime on first use."
+        )
+        files_form.addRow("UVR vocal cleanup", self.separation_cleanup_combo)
+        cleanup_hint = QLabel(
+            "Full UVR pass separates the mix, removes vocal echo/reverb and reduces vocal noise. "
+            "Cleanup can lose quiet notes or harmonies; raw stems are saved beside the treated WAVs."
+        )
+        cleanup_hint.setWordWrap(True)
+        cleanup_hint.setObjectName("subtitle")
+        files_form.addRow("", cleanup_hint)
+        self.transcription_method_combo = QComboBox()
+        self.transcription_method_combo.addItem("Audio-checked stems · vocal pitch / backing evidence", "advanced")
+        self.transcription_method_combo.addItem("YourMT3+ · raw independent stems comparison", "advanced_native")
+        self.transcription_method_combo.addItem("YourMT3+ · full mix comparison (experimental)", "advanced_mix")
+        self.transcription_method_combo.addItem("Stem-aware · vocal fundamental / backing notes", "stem_aware")
+        self.transcription_method_combo.addItem("Original Basic Pitch · comparison", "polyphonic")
+        self.transcription_method_combo.setCurrentIndex(self.transcription_method_combo.findData("stem_aware"))
+        self.transcription_method_combo.setToolTip(
+            "Audio-checked stems use CREPE for one vocal melody and screen YourMT3+ backing notes against "
+            "competing fundamentals in the actual audio. Backing is unlabelled because guessed instrument "
+            "classes are unreliable. Spectral support is approximate and can miss quiet notes. "
+            "Both stems are required for a full cover. Raw YourMT3+ comparisons preserve model predictions. "
+            "Their controls are independent of Basic Pitch thresholds. Stem-aware tracks one vocal with pYIN. "
+            "For backing audio it reduces drum transients "
+            "and requires detected attacks. Minimum note length still applies. Onset and Frame thresholds "
+            "apply to Basic Pitch only; vocal confidence is separate. "
+            "Original Basic Pitch retains the previous method for comparison."
+        )
+        files_form.addRow("Transcription method", self.transcription_method_combo)
+        self.recover_quiet_notes_checkbox = QCheckBox("Recover quiet notes supported by the audio")
+        self.recover_quiet_notes_checkbox.setChecked(True)
+        self.recover_quiet_notes_checkbox.setToolTip(
+            "Audio-checked mode rechecks quiet vocal frames within detected singing and quiet existing backing "
+            "candidates against the audio. It can retain more real notes, but weak evidence can still admit false notes. "
+            "Raw model MIDI remains available for comparison."
+        )
+        files_form.addRow("Audio-checked recovery", self.recover_quiet_notes_checkbox)
+        self.vocal_confidence_spin = QDoubleSpinBox()
+        self.vocal_confidence_spin.setRange(0.0, 1.0)
+        self.vocal_confidence_spin.setSingleStep(0.01)
+        self.vocal_confidence_spin.setValue(0.01)
+        self.vocal_confidence_spin.setToolTip(
+            "pYIN already rejects unvoiced frames. Raising this extra probability filter can erase breathy "
+            "or distorted singing; begin at 0.01. It applies only to Stem-aware vocals."
+        )
+        files_form.addRow("Vocal confidence", self.vocal_confidence_spin)
+
+        stem_folder_row = QHBoxLayout()
+        self.stem_folder_edit = QLineEdit()
+        self.stem_folder_edit.setPlaceholderText("Folder for both UVR WAV stems…")
+        stem_folder_button = QPushButton("Browse")
+        stem_folder_button.setObjectName("secondary")
+        stem_folder_button.clicked.connect(self.browse_stem_folder)
+        stem_folder_row.addWidget(self.stem_folder_edit, 1)
+        stem_folder_row.addWidget(stem_folder_button)
+        self.stem_folder_button = stem_folder_button
+        files_form.addRow("UVR stem folder", stem_folder_row)
+
+        raw_row = QHBoxLayout()
+        self.raw_edit = QLineEdit()
+        self.raw_edit.setPlaceholderText("Raw transcription destination for audio input…")
+        raw_button = QPushButton("Browse")
+        raw_button.setObjectName("secondary")
+        raw_button.clicked.connect(self.browse_raw_output)
+        raw_row.addWidget(self.raw_edit, 1)
+        raw_row.addWidget(raw_button)
+        self.raw_button = raw_button
+        files_form.addRow("Raw transcription", raw_row)
+
+        output_row = QHBoxLayout()
+        self.output_edit = QLineEdit()
+        self.output_edit.setPlaceholderText("Processed Source .mid destination…")
+        output_button = QPushButton("Browse")
+        self.output_button = output_button
+        output_button.setObjectName("secondary")
+        output_button.clicked.connect(self.browse_output)
+        output_row.addWidget(self.output_edit, 1)
+        output_row.addWidget(output_button)
+        files_form.addRow("Transcription MIDI", output_row)
+        settings_layout.addWidget(files_box)
+
+        processing_box = QGroupBox("Transcription detection")
+        processing_form = QFormLayout(processing_box)
+        self.profile_hint = QLabel()
+        self.profile_hint.setWordWrap(True)
+        self.profile_hint.setObjectName("subtitle")
+        processing_form.addRow("", self.profile_hint)
+
+        self.onset_spin = QDoubleSpinBox()
+        self.onset_spin.setRange(0.10, 0.90)
+        self.onset_spin.setSingleStep(0.05)
+        self.onset_spin.setDecimals(2)
+        self.onset_spin.setValue(RECOMMENDED_ONSET_THRESHOLD)
+        processing_form.addRow("Audio onset confidence", self.onset_spin)
+
+        self.frame_spin = QDoubleSpinBox()
+        self.frame_spin.setRange(0.10, 0.90)
+        self.frame_spin.setSingleStep(0.05)
+        self.frame_spin.setDecimals(2)
+        self.frame_spin.setValue(RECOMMENDED_FRAME_THRESHOLD)
+        processing_form.addRow("Audio frame confidence", self.frame_spin)
+
+        self.audio_min_note_spin = QSpinBox()
+        self.audio_min_note_spin.setRange(20, 1000)
+        self.audio_min_note_spin.setValue(RECOMMENDED_MINIMUM_NOTE_MS)
+        self.audio_min_note_spin.setSuffix(" ms")
+        processing_form.addRow("Audio minimum note", self.audio_min_note_spin)
+
+        self.pitch_focus_combo = QComboBox()
+        for focus_name, (label, _minimum, _maximum) in AUDIO_PITCH_FOCUS_RANGES.items():
+            self.pitch_focus_combo.addItem(label, focus_name)
+        self.pitch_focus_combo.setCurrentIndex(self.pitch_focus_combo.findData("full"))
+        self.pitch_focus_combo.setToolTip(
+            "Optional source-frequency filter for detection. Full model range is the default; "
+            "SCUM range fitting happens later in playback settings."
+        )
+        processing_form.addRow("Audio pitch focus", self.pitch_focus_combo)
+        settings_layout.addWidget(processing_box)
+
+        self.files_box = files_box
+        self.processing_box = processing_box
+
+        self.form_status_label = QLabel("Choose an audio or MIDI source to begin.")
+        self.form_status_label.setWordWrap(True)
+        self.form_status_label.setAccessibleName("Song Transposer readiness")
+        _set_visual_state(self.form_status_label, "inlineIdle")
+        settings_layout.addWidget(self.form_status_label)
+        settings_layout.addStretch(1)
+        layout.addWidget(settings_scroll, 3)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        layout.addWidget(self.progress)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(400)
+        layout.addWidget(self.log, 1)
+
+        buttons = QHBoxLayout()
+        self.process_button = QPushButton("Build Source MIDI")
+        self.process_button.clicked.connect(self.build_song)
+
+        self.separate_only_button = QPushButton("Separate stems only")
+        self.separate_only_button.setObjectName("secondary")
+        self.separate_only_button.setToolTip("Separate vocals and instrumental WAV stems without transcribing to MIDI.")
+        self.separate_only_button.clicked.connect(self.separate_stems_only)
+
+        self.use_button = QPushButton("Load transcription MIDI")
+        self.use_button.setObjectName("secondary")
+        self.use_button.setEnabled(False)
+        self.use_button.clicked.connect(self.accept)
+
+        close_button = QPushButton("Close")
+        close_button.setObjectName("secondary")
+        close_button.clicked.connect(self.reject)
+
+        buttons.addWidget(self.process_button)
+        buttons.addWidget(self.separate_only_button)
+        buttons.addWidget(self.use_button)
+        buttons.addStretch(1)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        _describe_control(
+            self.input_edit,
+            "Song source path",
+            "An existing audio file to transcribe or MIDI file to preserve.",
+        )
+        _describe_control(
+            self.raw_edit,
+            "Raw transcription output path",
+            "For audio sources, keep the untouched Basic Pitch transcription at this MIDI path.",
+        )
+        _describe_control(
+            self.output_edit,
+            "Transcription MIDI output path",
+            "The separate Source MIDI destination; the source is never overwritten.",
+        )
+        _describe_control(
+            self.process_button,
+            "Build Source MIDI",
+            "Transcribe the selected audio and export MIDI without game arrangement.",
+        )
+        self._operation_controls = (
+            self.files_box,
+            self.processing_box,
+        )
+
+        self.input_edit.textChanged.connect(self._source_changed)
+        self.raw_edit.textChanged.connect(self._refresh_action_state)
+        self.stem_folder_edit.textChanged.connect(self._refresh_action_state)
+        self.output_edit.textChanged.connect(self._refresh_action_state)
+        self.stem_combo.activated.connect(self._stem_selected)
+        self.stem_combo.currentIndexChanged.connect(self._update_process_button_label)
+        self.separate_checkbox.toggled.connect(self._source_changed)
+        self.transcription_method_combo.currentIndexChanged.connect(self._source_changed)
+        if advanced_tools_status().available:
+            self.transcription_method_combo.setCurrentIndex(0)
+            self.stem_combo.setCurrentIndex(self.stem_combo.findData("both"))
+        self._source_changed()
+
+    def set_input_path(self, path: str | Path) -> None:
+        source = Path(path).expanduser()
+        self.input_edit.setText(str(source))
+        if source.suffix.lower() in AUDIO_EXTENSIONS:
+            self.raw_edit.setText(str(source.with_suffix(".transcribed.mid")))
+            self.stem_folder_edit.setText(str(source.parent / f"{source.stem}.uvr-stems"))
+        self.output_edit.setText(str(source.with_suffix(".transcription.mid")))
+        self._source_changed()
+
+    def _update_process_button_label(self) -> None:
+        if not hasattr(self, "process_button"):
+            return
+        raw_text = self.input_edit.text().strip()
+        suffix = Path(raw_text).suffix.lower() if raw_text else ""
+        if suffix not in MIDI_EXTENSIONS and self.separate_checkbox.isChecked():
+            data = self.stem_combo.currentData()
+            if data == "both":
+                self.process_button.setText("Build Multi-Stem Cover MIDI (All-in-One)")
+            elif data == "vocals":
+                self.process_button.setText("Build Source Vocal MIDI")
+            else:
+                self.process_button.setText("Build Source Instrumental MIDI")
+        else:
+            self.process_button.setText("Build Source MIDI")
+
+    def _stem_selected(self, *_args) -> None:
+        self._update_process_button_label()
+
+    def _source_changed(self, *_args) -> None:
+        raw_text = self.input_edit.text().strip()
+        suffix = Path(raw_text).suffix.lower() if raw_text else ""
+        is_midi = suffix in MIDI_EXTENSIONS
+        audio_eligible = not is_midi
+        advanced = self.transcription_method_combo.currentData() in {"advanced", "advanced_native", "advanced_mix"} and audio_eligible
+        self.raw_edit.setEnabled(audio_eligible)
+        self.raw_button.setEnabled(audio_eligible)
+        self.onset_spin.setEnabled(audio_eligible and not advanced)
+        self.frame_spin.setEnabled(audio_eligible and not advanced)
+        self.audio_min_note_spin.setEnabled(audio_eligible and not advanced)
+        self.pitch_focus_combo.setEnabled(audio_eligible and not advanced)
+        self.vocal_confidence_spin.setEnabled(audio_eligible and not advanced)
+        self.transcription_method_combo.setEnabled(audio_eligible)
+        self.recover_quiet_notes_checkbox.setEnabled(
+            audio_eligible and self.transcription_method_combo.currentData() == "advanced"
+        )
+        if advanced:
+            self.profile_hint.setText(
+                "Tracks one vocal melody and keeps backing notes with spectral support; instrument guesses stay in the raw MIDI."
+                if self.transcription_method_combo.currentData() == "advanced" else
+                "Preserves raw model predictions for comparison. Instrument labels and notes may be wrong.")
+        else:
+            self.profile_hint.setText("Export preserves transcription pitches, timing, durations and polyphony. Prepare for SCUM in playback settings.")
+        self.separate_checkbox.setEnabled(audio_eligible)
+        separation_enabled = audio_eligible and self.separate_checkbox.isChecked()
+        self.stem_combo.setEnabled(separation_enabled)
+        self.separation_quality_combo.setEnabled(separation_enabled)
+        self.separation_cleanup_combo.setEnabled(separation_enabled)
+        self.stem_folder_edit.setEnabled(separation_enabled)
+        self.stem_folder_button.setEnabled(separation_enabled)
+        self._update_process_button_label()
+        self._refresh_action_state()
+
+    def _refresh_runtime_status(self) -> None:
+        status = audio_tools_status()
+        self.runtime_label.setText(status.message)
+        self.install_button.setEnabled(self.process.state() == QProcess.ProcessState.NotRunning)
+        separation_status = separation_tools_status()
+        self.separation_runtime_label.setText(separation_status.message)
+        self.separation_install_button.setEnabled(self.process.state() == QProcess.ProcessState.NotRunning)
+        self.advanced_runtime_label.setText(advanced_tools_status().message)
+        self.advanced_install_button.setEnabled(self.process.state() == QProcess.ProcessState.NotRunning)
+        self._refresh_action_state()
+
+    def _refresh_action_state(self) -> None:
+        if not hasattr(self, "process_button"):
+            return
+        source = Path(self.input_edit.text().strip()).expanduser()
+        output = Path(self.output_edit.text().strip()).expanduser()
+        suffix = source.suffix.lower()
+        is_audio = suffix in AUDIO_EXTENSIONS
+        is_midi = suffix in MIDI_EXTENSIONS
+        source_ready = source.is_file() and (is_audio or is_midi)
+        output_ready = output.suffix.lower() in MIDI_EXTENSIONS
+        distinct_output = not (
+            is_midi
+            and output_ready
+            and source_ready
+            and source.resolve() == output.resolve()
+        )
+        raw = Path(self.raw_edit.text().strip()).expanduser()
+        raw_ready = not is_audio or (
+            raw.suffix.lower() in MIDI_EXTENSIONS
+            and output_ready
+            and raw.resolve() != output.resolve()
+        )
+        runtime_status = advanced_tools_status() if self.transcription_method_combo.currentData() in {"advanced", "advanced_native", "advanced_mix"} else audio_tools_status()
+        audio_ready = not is_audio or runtime_status.available
+        separation_requested = is_audio and self.separate_checkbox.isChecked()
+        evidence_ready = not is_audio or self.transcription_method_combo.currentData() != "advanced" or separation_requested
+        separation_folder_ready = (
+            not separation_requested or bool(self.stem_folder_edit.text().strip())
+        )
+        separation_ready = (
+            not separation_requested or separation_tools_status().available
+        )
+        running = self.process.state() != QProcess.ProcessState.NotRunning or bool(self._process_kind)
+        ready = all(
+            (
+                source_ready,
+                output_ready,
+                distinct_output,
+                raw_ready,
+                audio_ready,
+                separation_folder_ready,
+                separation_ready,
+                evidence_ready,
+                not running,
+            )
+        )
+        self.process_button.setEnabled(ready)
+        self.separate_only_button.setEnabled(
+            is_audio
+            and source.is_file()
+            and separation_tools_status().available
+            and bool(self.stem_folder_edit.text().strip())
+            and not running
+        )
+        if running:
+            message, state = "Operation is running…", "inlineGood"
+        elif not source_ready:
+            message, state = "Choose an existing supported audio or MIDI source.", "inlineIdle"
+        elif not evidence_ready:
+            message, state = "Audio-checked conversion needs isolated stems. Enable separation or choose a raw model comparison.", "inlineWarn"
+        elif not output_ready:
+            message, state = "Choose a transcription MIDI destination ending in .mid or .midi.", "inlineWarn"
+        elif not distinct_output:
+            message, state = "The transcription MIDI must use a different file from the source.", "inlineWarn"
+        elif not raw_ready:
+            message, state = "Choose a separate raw-transcription MIDI destination.", "inlineWarn"
+        elif not audio_ready:
+            message, state = "Install or repair the audio transcription runtime.", "inlineWarn"
+        elif not separation_folder_ready:
+            message, state = "Choose a folder for the two UVR stem WAV files.", "inlineWarn"
+        elif not separation_ready:
+            message, state = "Install or repair UVR, or turn off source separation.", "inlineWarn"
+        else:
+            source_kind = "audio transcription" if is_audio else "MIDI copy"
+            message, state = f"Ready for {source_kind}. The source file will not be modified.", "inlineGood"
+        self.form_status_label.setText(message)
+        _set_visual_state(self.form_status_label, state)
+
+    def _set_operation_controls_enabled(self, enabled: bool) -> None:
+        for control in self._operation_controls:
+            control.setEnabled(enabled)
+
+    def browse_input(self) -> None:
+        filters = (
+            "Song files (*.mp3 *.wav *.flac *.ogg *.m4a *.mid *.midi);;"
+            "Audio files (*.mp3 *.wav *.flac *.ogg *.m4a);;MIDI files (*.mid *.midi)"
+        )
+        path, _ = QFileDialog.getOpenFileName(self, "Choose song", str(Path.home()), filters)
+        if path:
+            self.set_input_path(path)
+
+    def browse_raw_output(self) -> None:
+        default = self.raw_edit.text().strip() or "song.transcribed.mid"
+        path, _ = QFileDialog.getSaveFileName(self, "Save raw transcription", default, "MIDI files (*.mid *.midi)")
+        if path:
+            self.raw_edit.setText(path)
+
+    def browse_stem_folder(self) -> None:
+        default = self.stem_folder_edit.text().strip() or str(Path.home())
+        path = QFileDialog.getExistingDirectory(self, "Choose UVR stem folder", default)
+        if path:
+            self.stem_folder_edit.setText(path)
+
+    def browse_output(self) -> None:
+        default = self.output_edit.text().strip() or "song.transcription.mid"
+        path, _ = QFileDialog.getSaveFileName(self, "Save transcription MIDI", default, "MIDI files (*.mid *.midi)")
+        if path:
+            self.output_edit.setText(path)
+
+    def install_runtime(self) -> None:
+        if os.name != "nt":
+            QMessageBox.information(self, APP_TITLE, "The bundled audio runtime installer currently targets Windows.")
+            return
+        shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+        script = resource_path("install_audio_tools.ps1")
+        if not shell or not script.exists():
+            QMessageBox.critical(self, APP_TITLE, "PowerShell or the audio installer resource is missing.")
+            return
+        self._start_process("install", shell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)])
+
+    def install_separation_runtime(self) -> None:
+        if os.name != "nt":
+            QMessageBox.information(self, APP_TITLE, "The bundled UVR runtime installer currently targets Windows.")
+            return
+        shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+        script = resource_path("install_separation_tools.ps1")
+        if not shell or not script.exists():
+            QMessageBox.critical(self, APP_TITLE, "PowerShell or the UVR installer resource is missing.")
+            return
+        self._start_process(
+            "install_separation",
+            shell,
+            ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        )
+
+    def _confirm_overwrite(self, path: Path) -> bool:
+        if not path.exists():
+            return True
+        return (
+            QMessageBox.question(
+                self,
+                APP_TITLE,
+                f"Overwrite {path.name}?",
+            )
+            == QMessageBox.StandardButton.Yes
+        )
+
+    def separate_stems_only(self) -> None:
+        source = Path(self.input_edit.text().strip()).expanduser()
+        suffix = source.suffix.lower()
+        if not source.is_file() or suffix not in AUDIO_EXTENSIONS:
+            QMessageBox.warning(self, APP_TITLE, "Choose an existing audio file (.mp3, .wav, etc.) for stem separation.")
+            return
+        if not separation_tools_status().available:
+            QMessageBox.warning(self, APP_TITLE, "Install or repair the UVR separation runtime first.")
+            return
+        stem_folder = Path(self.stem_folder_edit.text().strip()).expanduser()
+        if not self.stem_folder_edit.text().strip():
+            QMessageBox.warning(self, APP_TITLE, "Choose a folder for the UVR stem WAV files.")
+            return
+        vocals_output, instrumental_output = separation_stem_paths(source, stem_folder)
+        cleanup = str(self.separation_cleanup_combo.currentData())
+        existing_stems = [path.name for path in separation_output_paths(
+            vocals_output, instrumental_output, cleanup=cleanup,
+        ) if path.exists()]
+        if existing_stems:
+            names = "\n".join(existing_stems)
+            answer = QMessageBox.question(self, APP_TITLE, f"Overwrite these UVR outputs?\n\n{names}")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            program, arguments = separation_worker_command(
+                source, vocals_output, instrumental_output,
+                quality=self.separation_quality_combo.currentData(), cleanup=cleanup,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, APP_TITLE, str(exc))
+            return
+        self.log.clear()
+        self.log.appendPlainText(f"Separating stems for: {source.name}")
+        self.log.appendPlainText(f"Vocals destination: {vocals_output}")
+        self.log.appendPlainText(f"Instrumental destination: {instrumental_output}")
+        self.log.appendPlainText(f"Vocal cleanup: {cleanup}; instrumental separation remains unchanged.")
+        self._start_process("separate_only", program, arguments, clear_log=False)
+
+    def build_song(self) -> None:
+        source = Path(self.input_edit.text().strip()).expanduser()
+        output = Path(self.output_edit.text().strip()).expanduser()
+        suffix = source.suffix.lower()
+        if not source.is_file() or suffix not in (AUDIO_EXTENSIONS | MIDI_EXTENSIONS):
+            QMessageBox.warning(self, APP_TITLE, "Choose a supported audio or MIDI input file first.")
+            return
+        if output.suffix.lower() not in MIDI_EXTENSIONS:
+            QMessageBox.warning(self, APP_TITLE, "The processed output filename must end in .mid or .midi.")
+            return
+        if suffix in MIDI_EXTENSIONS and source.resolve() == output.resolve():
+            QMessageBox.warning(self, APP_TITLE, "Processed output must not overwrite the source MIDI.")
+            return
+        if not self._confirm_overwrite(output):
+            return
+
+        self.processed_path = None
+        self.is_cover_arrangement = False
+        self.use_button.setEnabled(False)
+        self.log.clear()
+        self.progress.setRange(0, 0)
+        if suffix in MIDI_EXTENSIONS:
+            self._finish_processing(source, output)
+            return
+
+        raw_output = Path(self.raw_edit.text().strip()).expanduser()
+        if raw_output.suffix.lower() not in MIDI_EXTENSIONS:
+            QMessageBox.warning(self, APP_TITLE, "Choose a raw transcription destination ending in .mid or .midi.")
+            self.progress.setRange(0, 1)
+            return
+        if raw_output.resolve() == output.resolve():
+            QMessageBox.warning(self, APP_TITLE, "Raw transcription and transcription MIDI must use different files.")
+            self.progress.setRange(0, 1)
+            return
+        if not self._confirm_overwrite(raw_output):
+            self.progress.setRange(0, 1)
+            return
+
+        self._pending_raw_path = raw_output
+        self._pending_output_path = output
+        if self.separate_checkbox.isChecked():
+            stem_folder = Path(self.stem_folder_edit.text().strip()).expanduser()
+            if not self.stem_folder_edit.text().strip():
+                QMessageBox.warning(self, APP_TITLE, "Choose a folder for the UVR stem WAV files.")
+                self.progress.setRange(0, 1)
+                return
+            vocals_output, instrumental_output = separation_stem_paths(source, stem_folder)
+            self._vocals_wav_path = vocals_output
+            self._inst_wav_path = instrumental_output
+            mode = self.stem_combo.currentData()
+
+            if mode == "both":
+                self.is_cover_arrangement = True
+                self._vocals_raw_path = raw_output.parent / f"{source.stem}.vocals.transcribed.mid"
+                self._inst_raw_path = raw_output.parent / f"{source.stem}.instrumental.transcribed.mid"
+                if self.transcription_method_combo.currentData() not in {"advanced", "advanced_native", "advanced_mix"}:
+                    if not all(self._confirm_overwrite(path) for path in (self._vocals_raw_path, self._inst_raw_path)):
+                        self.progress.setRange(0, 1)
+                        self.progress.setValue(0)
+                        return
+                needed_stems = [vocals_output, instrumental_output]
+            else:
+                selected = vocals_output if mode == "vocals" else instrumental_output
+                self._pending_transcription_path = selected
+                needed_stems = [selected]
+
+            quality = str(self.separation_quality_combo.currentData())
+            cleanup = str(self.separation_cleanup_combo.currentData())
+            existing_stems = [p for p in separation_output_paths(
+                vocals_output, instrumental_output, cleanup=cleanup,
+            ) if p.exists()]
+            reuse_stems = False
+
+            if reusable_stems(source, vocals_output, instrumental_output, quality=quality, cleanup=cleanup):
+                names = "\n".join(f"• {p.name}" for p in needed_stems)
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle(APP_TITLE)
+                msg_box.setIcon(QMessageBox.Icon.Question)
+                msg_box.setText("Existing UVR stems found:")
+                msg_box.setInformativeText(
+                    f"{names}\n\nMatching cleanup: {cleanup}, quality: {quality}. Reuse these stems or rerun UVR "
+                    "and overwrite the following outputs?\n\n" + "\n".join(f"• {p.name}" for p in existing_stems)
+                )
+                reuse_btn = msg_box.addButton("Reuse Stems", QMessageBox.ButtonRole.AcceptRole)
+                overwrite_btn = msg_box.addButton("Re-Separate (Overwrite)", QMessageBox.ButtonRole.DestructiveRole)
+                cancel_btn = msg_box.addButton(QMessageBox.StandardButton.Cancel)
+                # Fresh inference is preferred when investigating poor separation quality.
+                msg_box.setDefaultButton(cancel_btn)
+                msg_box.exec()
+                clicked = msg_box.clickedButton()
+                if clicked not in (reuse_btn, overwrite_btn):
+                    self.progress.setRange(0, 1)
+                    return
+                reuse_stems = (clicked == reuse_btn)
+            elif existing_stems:
+                names = "\n".join(f"• {p.name}" for p in existing_stems)
+                answer = QMessageBox.question(self, APP_TITLE, f"Overwrite existing UVR outputs for {cleanup} cleanup?\n\n{names}")
+                if answer != QMessageBox.StandardButton.Yes:
+                    self.progress.setRange(0, 1)
+                    return
+
+            if reuse_stems:
+                if mode == "both":
+                    self.log.appendPlainText("Reusing existing UVR stems. Skipping Step 1/3 (separation).")
+                    self._start_vocals_cover_transcription()
+                    return
+                self.log.appendPlainText(f"Reusing existing UVR stem: {self._pending_transcription_path.name}")
+                self._start_pending_transcription()
+                return
+
+            try:
+                program, arguments = separation_worker_command(
+                    source, vocals_output, instrumental_output, quality=quality, cleanup=cleanup,
+                )
+            except Exception as exc:
+                QMessageBox.warning(self, APP_TITLE, str(exc))
+                self.progress.setRange(0, 1)
+                return
+
+            if mode == "both":
+                self.log.appendPlainText(f"Full Cover Pipeline: Step 1/3 — UVR separation and {cleanup} vocal cleanup…")
+                self._start_process("separate_both", program, arguments, clear_log=False)
+                return
+
+            self.log.appendPlainText(
+                f"UVR will separate both stems with {cleanup} vocal cleanup and transcribe the {mode} stem."
+            )
+            self._start_process("separate", program, arguments, clear_log=False)
+            return
+        self._pending_transcription_path = source
+        self._start_pending_transcription()
+
+    def _start_vocals_cover_transcription(self) -> None:
+        if self.transcription_method_combo.currentData() in {"advanced", "advanced_native", "advanced_mix"}:
+            if self._vocals_wav_path and self._inst_wav_path:
+                self._start_advanced_transcription(self._vocals_wav_path, second_input=self._inst_wav_path)
+            else:
+                QMessageBox.critical(self, APP_TITLE, "The synchronized stem paths are missing.")
+            return
+        if not self._vocals_wav_path or not self._vocals_wav_path.is_file():
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            QMessageBox.critical(self, APP_TITLE, "Vocals stem WAV is missing.")
+            return
+        if not self._vocals_raw_path:
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            QMessageBox.critical(self, APP_TITLE, "Vocals transcription output path was not configured.")
+            return
+        self.log.appendPlainText("Full Cover Pipeline: Step 2/3 — Transcribing Vocals stem…")
+        try:
+            _label, min_f, max_f = AUDIO_PITCH_FOCUS_RANGES["full"]
+            program, arguments = audio_worker_command(
+                self._vocals_wav_path,
+                self._vocals_raw_path,
+                onset_threshold=self.onset_spin.value(),
+                frame_threshold=self.frame_spin.value(),
+                minimum_note_ms=self.audio_min_note_spin.value(),
+                minimum_frequency=min_f,
+                maximum_frequency=max_f,
+                mode="vocals" if self.transcription_method_combo.currentData() == "stem_aware" else "polyphonic",
+                vocal_confidence=self.vocal_confidence_spin.value(),
+            )
+            self._start_process("transcribe_both_vocals", program, arguments, clear_log=False)
+        except Exception as exc:
+            logger.exception("Could not start vocals transcription")
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            self.log.appendPlainText(f"Error starting vocals transcription: {exc}")
+            QMessageBox.critical(self, APP_TITLE, f"Could not start vocals transcription:\n\n{exc}")
+
+    def _start_instrumental_cover_transcription(self) -> None:
+        if not self._inst_wav_path or not self._inst_wav_path.is_file():
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            QMessageBox.critical(self, APP_TITLE, "Instrumental stem WAV is missing.")
+            return
+        if not self._inst_raw_path:
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            QMessageBox.critical(self, APP_TITLE, "Instrumental transcription output path was not configured.")
+            return
+        self.log.appendPlainText("Vocals transcription complete. Full Cover Pipeline: Step 3/3 — Transcribing Instrumental stem…")
+        try:
+            _label, min_f, max_f = AUDIO_PITCH_FOCUS_RANGES["full"]
+            program, arguments = audio_worker_command(
+                self._inst_wav_path,
+                self._inst_raw_path,
+                onset_threshold=self.onset_spin.value(),
+                frame_threshold=self.frame_spin.value(),
+                minimum_note_ms=self.audio_min_note_spin.value(),
+                minimum_frequency=min_f,
+                maximum_frequency=max_f,
+                mode="instrumental" if self.transcription_method_combo.currentData() == "stem_aware" else "polyphonic",
+            )
+            self._start_process("transcribe_both_inst", program, arguments, clear_log=False)
+        except Exception as exc:
+            logger.exception("Could not start instrumental transcription")
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            self.log.appendPlainText(f"Error starting instrumental transcription: {exc}")
+            QMessageBox.critical(self, APP_TITLE, f"Could not start instrumental transcription:\n\n{exc}")
+
+    def _start_pending_transcription(self) -> None:
+        if self._pending_transcription_path is None or self._pending_raw_path is None:
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            QMessageBox.critical(self, APP_TITLE, "The pending transcription paths were lost.")
+            return
+        if self.transcription_method_combo.currentData() in {"advanced", "advanced_native", "advanced_mix"}:
+            role = str(self.stem_combo.currentData()) if self.separate_checkbox.isChecked() else "full"
+            self._start_advanced_transcription(self._pending_transcription_path, role=role)
+            return
+        try:
+            focus_label, minimum_frequency, maximum_frequency = AUDIO_PITCH_FOCUS_RANGES[
+                str(self.pitch_focus_combo.currentData())
+            ]
+            program, arguments = audio_worker_command(
+                self._pending_transcription_path,
+                self._pending_raw_path,
+                onset_threshold=self.onset_spin.value(),
+                frame_threshold=self.frame_spin.value(),
+                minimum_note_ms=self.audio_min_note_spin.value(),
+                minimum_frequency=minimum_frequency,
+                maximum_frequency=maximum_frequency,
+                mode=("vocals" if self.stem_combo.currentData() == "vocals" else "instrumental")
+                if self.separate_checkbox.isChecked() and self.transcription_method_combo.currentData() == "stem_aware"
+                else "polyphonic",
+                vocal_confidence=self.vocal_confidence_spin.value(),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, APP_TITLE, str(exc))
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            return
+        self.log.appendPlainText(f"Pitch detection focus: {focus_label}.")
+        self.log.appendPlainText(f"Transcribing: {self._pending_transcription_path}")
+        self._start_process("transcribe", program, arguments, clear_log=False)
+
+    def install_advanced_runtime(self) -> None:
+        shell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+        installer = resource_path("install_advanced_tools.ps1")
+        if os.name != "nt" or not shell or not installer.is_file():
+            QMessageBox.warning(self, APP_TITLE, "The bundled YourMT3+ installer requires Windows PowerShell.")
+            return
+        root = advanced_runtime_dir()
+        if not root.exists():
+            root = app_data_dir() / "optional-runtimes" / "advanced-runtime"
+        self._start_process("install_advanced", shell,
+                            ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(installer),
+                             "-InstallRoot", str(root)])
+
+    def _start_advanced_transcription(self, source: Path, *, role: str = "full", second_input: Path | None = None) -> None:
+        if self._pending_raw_path is None or self._pending_output_path is None:
+            QMessageBox.critical(self, APP_TITLE, "The transcription destinations are missing.")
+            self.progress.setRange(0, 1)
+            return
+        try:
+            program, arguments = advanced_worker_command(
+                source, self._pending_raw_path, self._pending_output_path, role=role, second_input=second_input,
+                stem_passes=second_input is not None and self.transcription_method_combo.currentData() in {"advanced", "advanced_native"},
+                audio_checked=self.transcription_method_combo.currentData() == "advanced",
+                recover_quiet_notes=(self.transcription_method_combo.currentData() == "advanced"
+                                     and self.recover_quiet_notes_checkbox.isChecked()))
+        except Exception as exc:
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            QMessageBox.warning(self, APP_TITLE, str(exc))
+            return
+        self.is_cover_arrangement = role == "full"
+        self.log.appendPlainText(
+            "Checking vocal F0 and backing spectral support; guessed instrument classes remain only in the raw MIDI."
+            if self.transcription_method_combo.currentData() == "advanced" else
+            "Comparison: retaining raw model pitches, timing and guessed instrument classes.")
+        if second_input:
+            message = "Transcribing the vocal and backing stems independently with one model load." if self.transcription_method_combo.currentData() in {"advanced", "advanced_native"} else "Reconstructing the selected mix from synchronized stems in memory."
+            self.log.appendPlainText(message)
+        self._start_process("transcribe_advanced", program, arguments, clear_log=False)
+
+    def _finish_processing(self, source: Path, output: Path) -> None:
+        try:
+            self.processed_path = copy_source_midi(source, output)
+        except Exception as exc:
+            logger.exception("MIDI export failed")
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            QMessageBox.critical(self, APP_TITLE, f"Could not export MIDI: {exc}")
+            return
+        self.progress.setRange(0, 1)
+        self.progress.setValue(1)
+        self.use_button.setEnabled(True)
+        self.log.appendPlainText(f"Source MIDI preserved without arrangement: {self.processed_path}")
+
+    def _start_process(self, kind: str, program: str, arguments: list[str], *, clear_log: bool = True) -> None:
+        if self.process.state() != QProcess.ProcessState.NotRunning:
+            return
+        self._process_kind = kind
+        self._had_process_error = False
+        if clear_log:
+            self.log.clear()
+        self.progress.setRange(0, 0)
+        self.process_button.setEnabled(False)
+        self.separate_only_button.setEnabled(False)
+        self.install_button.setEnabled(False)
+        self.separation_install_button.setEnabled(False)
+        self.advanced_install_button.setEnabled(False)
+        self._set_operation_controls_enabled(False)
+        self._refresh_action_state()
+        self.process.start(program, arguments)
+
+    def _process_started(self) -> None:
+        actions = {
+            "install": "Audio tools installation",
+            "install_separation": "UVR tools installation",
+            "separate": "UVR source separation",
+            "separate_only": "UVR source separation",
+            "separate_both": "UVR stem separation (Full Cover Step 1/3)",
+            "transcribe": "Audio transcription",
+            "transcribe_both_vocals": "Vocals transcription (Full Cover Step 2/3)",
+            "transcribe_both_inst": "Instrumental transcription (Full Cover Step 3/3)",
+        }
+        action = actions.get(self._process_kind, "Song Transposer operation")
+        self.log.appendPlainText(f"{action} started.")
+
+    def _process_error(self, error: QProcess.ProcessError) -> None:
+        self._had_process_error = True
+        message = self.process.errorString() or str(error)
+        self.log.appendPlainText(f"Process error: {message}")
+        if error == QProcess.ProcessError.FailedToStart:
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            self._process_kind = ""
+            self._set_operation_controls_enabled(True)
+            self._refresh_runtime_status()
+            QMessageBox.critical(self, APP_TITLE, f"Could not start the Song Transposer operation: {message}")
+
+    def _read_stdout(self) -> None:
+        text = _read_process_text(self.process)
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                self.log.appendPlainText(line)
+                continue
+            event = payload.get("event")
+            if event == "status":
+                self.log.appendPlainText(str(payload.get("message", "Working…")))
+            elif event == "complete":
+                if payload.get("operation") == "separation":
+                    self.log.appendPlainText(
+                        f"UVR separation complete on {payload.get('backend', 'unknown')} using "
+                        f"{payload.get('model', 'the configured model')}."
+                    )
+                    self.log.appendPlainText(f"Vocals: {payload.get('vocals', '')}")
+                    self.log.appendPlainText(f"Instrumental: {payload.get('instrumental', '')}")
+                    self.log.appendPlainText(f"Vocal cleanup: {payload.get('cleanup', 'none')}.")
+                    for role in ("raw_vocals", "raw_instrumental"):
+                        if payload.get(role):
+                            self.log.appendPlainText(f"Untreated comparison: {payload[role]}")
+                else:
+                    notes = int(payload.get("notes", 0))
+                    self.log.appendPlainText(f"Raw transcription complete: {notes:,} notes.")
+            elif event == "error":
+                self.log.appendPlainText(f"Error: {payload.get('message', 'Unknown failure')}")
+            else:
+                self.log.appendPlainText(line)
+
+    def _read_stderr(self) -> None:
+        text = _read_process_text(self.process, stderr=True).strip()
+        if text:
+            self.log.appendPlainText(text)
+
+    def _process_finished(self, exit_code: int, status: QProcess.ExitStatus) -> None:
+        self._read_stdout()
+        self._read_stderr()
+        kind = self._process_kind
+        self._process_kind = ""
+        self._set_operation_controls_enabled(True)
+        self._refresh_runtime_status()
+        if exit_code != 0:
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            if not self._had_process_error or status != QProcess.ExitStatus.CrashExit:
+                QMessageBox.critical(self, APP_TITLE, "The Song Transposer operation failed. See the log for details.")
+            return
+        if kind == "install":
+            self.progress.setRange(0, 1)
+            self.progress.setValue(1)
+            QMessageBox.information(self, APP_TITLE, "Audio tools installed successfully.")
+        elif kind == "install_advanced":
+            self.progress.setRange(0, 1)
+            self.progress.setValue(1)
+            self.transcription_method_combo.setCurrentIndex(self.transcription_method_combo.findData("advanced"))
+            self.stem_combo.setCurrentIndex(self.stem_combo.findData("both"))
+            self._source_changed()
+            QMessageBox.information(self, APP_TITLE, "YourMT3+ and CREPE installed; inference checked.")
+        elif kind == "transcribe_advanced" and self._pending_output_path:
+            if not self._pending_output_path.is_file():
+                self.progress.setRange(0, 1)
+                self.progress.setValue(0)
+                QMessageBox.critical(self, APP_TITLE, "Transcription completed but the requested MIDI is missing.")
+                return
+            self.processed_path = self._pending_output_path.resolve()
+            self.progress.setRange(0, 1)
+            self.progress.setValue(1)
+            self.use_button.setEnabled(True)
+            self.log.appendPlainText(f"Playable MIDI saved (percussion excluded): {self.processed_path}")
+        elif kind == "install_separation":
+            self.progress.setRange(0, 1)
+            self.progress.setValue(1)
+            QMessageBox.information(self, APP_TITLE, "UVR separation tools installed successfully.")
+        elif kind == "separate_only":
+            self.progress.setRange(0, 1)
+            self.progress.setValue(1)
+            QMessageBox.information(
+                self,
+                APP_TITLE,
+                f"UVR stem separation complete!\n\nBoth stems saved to:\n{self.stem_folder_edit.text().strip()}",
+            )
+        elif kind == "separate" and self._pending_transcription_path:
+            if not self._pending_transcription_path.is_file():
+                self.progress.setRange(0, 1)
+                self.progress.setValue(0)
+                QMessageBox.critical(self, APP_TITLE, "UVR completed but the selected stem file is missing.")
+                return
+            self._start_pending_transcription()
+        elif kind == "separate_both":
+            if not self._vocals_wav_path or not self._vocals_wav_path.is_file():
+                self.progress.setRange(0, 1)
+                self.progress.setValue(0)
+                QMessageBox.critical(self, APP_TITLE, "UVR completed but vocals stem is missing.")
+                return
+            self.log.appendPlainText("UVR separation complete.")
+            self._start_vocals_cover_transcription()
+        elif kind == "transcribe_both_vocals":
+            if not self._vocals_raw_path or not self._vocals_raw_path.is_file():
+                self.progress.setRange(0, 1)
+                self.progress.setValue(0)
+                QMessageBox.critical(self, APP_TITLE, "Vocals transcription completed but raw MIDI is missing.")
+                return
+            self._start_instrumental_cover_transcription()
+        elif kind == "transcribe_both_inst":
+            if not self._inst_raw_path or not self._inst_raw_path.is_file():
+                self.progress.setRange(0, 1)
+                self.progress.setValue(0)
+                QMessageBox.critical(self, APP_TITLE, "Instrumental transcription completed but raw MIDI is missing.")
+                return
+            self._finish_cover_processing(self._vocals_raw_path, self._inst_raw_path, self._pending_output_path)
+        elif kind == "transcribe" and self._pending_raw_path and self._pending_output_path:
+            self._finish_processing(self._pending_raw_path, self._pending_output_path)
+
+    def _finish_cover_processing(self, vocals_raw: Path, inst_raw: Path, output: Path) -> None:
+        self.log.appendPlainText("Combining synchronized transcription tracks…")
+        QApplication.processEvents()
+        try:
+            vox_proj = load_midi(vocals_raw)
+            vox_notes = vox_proj.notes
+
+            inst_proj = load_midi(inst_raw)
+            inst_notes = inst_proj.notes
+
+            output_bpm = vox_proj.first_bpm
+            write_cover_midi(
+                vocals_notes=vox_notes,
+                instrumental_notes=inst_notes,
+                output_path=output,
+                bpm=output_bpm,
+                overwrite=True,
+            )
+        except Exception as exc:
+            logger.exception("Full cover processing failed")
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            QMessageBox.critical(self, APP_TITLE, f"Could not assemble cover MIDI:\n\n{exc}")
+            return
+
+        self.processed_path = output
+        self.is_cover_arrangement = True
+        self.progress.setRange(0, 1)
+        self.progress.setValue(1)
+        self.use_button.setEnabled(True)
+
+        self.log.appendPlainText(f"Exported {len(vox_notes)} vocal and {len(inst_notes)} backing notes with source timing: {output}")
+        self.log.appendPlainText("Load the MIDI and prepare it using your playback settings.")
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        urls = event.mimeData().urls()
+        if urls and Path(urls[0].toLocalFile()).suffix.lower() in (AUDIO_EXTENSIONS | MIDI_EXTENSIONS):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        urls = event.mimeData().urls()
+        if not urls:
+            event.ignore()
+            return
+        path = urls[0].toLocalFile()
+        if Path(path).suffix.lower() in (AUDIO_EXTENSIONS | MIDI_EXTENSIONS):
+            self.set_input_path(path)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.process.state() != QProcess.ProcessState.NotRunning:
+            answer = QMessageBox.question(
+                self,
+                APP_TITLE,
+                "A conversion or installation is still running. Cancel it and close?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            _terminate_process_tree(self.process)
+            self.process.waitForFinished(1000)
+        event.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, midi_provider: MidiInputProvider | None = None) -> None:
         super().__init__()
@@ -792,6 +2329,11 @@ class MainWindow(QMainWindow):
         self._syncing_simple_ui = False
         self.resize(self.settings.window_width, self.settings.window_height)
         self.project = None
+        self._external_lyrics = None
+        self._lyric_elapsed_ms = -1.0
+        self._auto_lyric_message = ""
+        self.auto_lyrics = AutoLyrics(self)
+        self.auto_lyrics.result.connect(self._automatic_lyrics_ready)
         self.score_analysis: ProjectAnalysis | None = None
         self.playback_sections: list[PlaybackSection] = []
         self.active_selection: PlaybackSelectionResult | None = None
@@ -811,8 +2353,6 @@ class MainWindow(QMainWindow):
         self._editor_geometry = None
         self._editor_was_maximized = False
         self._user_keep_on_top = bool(self.settings.window_on_top)
-        self._w_held = False
-        self._walk_backend = None
 
         self.signals = UiSignals()
         self.signals.status.connect(self._set_status)
@@ -939,7 +2479,22 @@ class MainWindow(QMainWindow):
         file_row.addWidget(self.file_edit, 1)
         file_row.addWidget(self.browse_button)
         file_row.addWidget(self.reload_button)
+        self.find_lyrics_button = QPushButton("Find lyrics")
+        self.find_lyrics_button.setToolTip("Search online for timed lyrics or load an .lrc file for this MIDI.")
+        self.find_lyrics_button.clicked.connect(self._find_lyrics)
+        file_row.addWidget(self.find_lyrics_button)
         source_layout.addLayout(file_row)
+        lyric_options = QHBoxLayout()
+        self.auto_lyrics_check = QCheckBox("Auto lyrics")
+        self.auto_lyrics_check.setToolTip("Automatically search LRCLIB using the MIDI filename. No MIDI upload.")
+        self.auto_lyrics_check.setChecked(self.settings.auto_lyrics)
+        self.auto_lyrics_check.toggled.connect(self._auto_lyrics_toggled)
+        lyric_options.addWidget(self.auto_lyrics_check)
+        self.lyric_source_status = QLabel("Lyrics load automatically with your MIDI.")
+        self.lyric_source_status.setTextFormat(Qt.TextFormat.PlainText)
+        self.lyric_source_status.setWordWrap(True)
+        lyric_options.addWidget(self.lyric_source_status, 1)
+        source_layout.addLayout(lyric_options)
 
         workflow_row = QHBoxLayout()
         workflow_row.setContentsMargins(0, 0, 0, 0)
@@ -1215,6 +2770,9 @@ class MainWindow(QMainWindow):
         )
         simple_playback_form.addRow("Quality", self.simple_performance_combo)
 
+        self.simple_fluid_phrasing_combo = _fluid_phrasing_combo()
+        simple_playback_form.addRow("Fluid phrasing", self.simple_fluid_phrasing_combo)
+
         speed_widget = QWidget()
         speed_layout = QVBoxLayout(speed_widget)
         speed_layout.setContentsMargins(0, 0, 0, 0)
@@ -1432,6 +2990,9 @@ class MainWindow(QMainWindow):
         self.performance_hint.setWordWrap(True)
         self.performance_hint.setObjectName("subtitle")
         self.performance_form.addRow("", self.performance_hint)
+
+        self.fluid_phrasing_combo = _fluid_phrasing_combo()
+        self.performance_form.addRow("Fluid phrasing", self.fluid_phrasing_combo)
 
         self.speed_spin = QDoubleSpinBox()
         self.speed_spin.setRange(0.25, 3.0)
@@ -1980,6 +3541,24 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
         self.progress.setAccessibleName("Playback progress")
         root.addWidget(self.progress)
+        self._lyric_timeline = LyricTimeline()
+        self.lyrics_panel = QWidget()
+        lyrics_layout = QVBoxLayout(self.lyrics_panel)
+        lyrics_layout.setContentsMargins(0, 0, 0, 0)
+        self.lyrics_toggle = QPushButton("+ Lyrics")
+        self.lyrics_toggle.setCheckable(True)
+        self.lyrics_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.lyrics_toggle.setAccessibleName("Expand or collapse lyrics")
+        self.lyrics_toggle.setToolTip("Show karaoke lyrics with the current line highlighted and upcoming lines below.")
+        self.karaoke_view = KaraokeView()
+        self.lyrics_label = self.karaoke_view.current
+        self.karaoke_view.hide()
+        self.lyrics_label.hide()
+        lyrics_layout.addWidget(self.lyrics_toggle)
+        lyrics_layout.addWidget(self.karaoke_view)
+        self.lyrics_toggle.toggled.connect(self._toggle_lyrics)
+        self.lyrics_panel.hide()
+        root.addWidget(self.lyrics_panel)
         self.setStatusBar(QStatusBar())
         self.statusBar().setAccessibleName("Application status")
         self.statusBar().showMessage("Ready. Play focuses SCUM automatically; F8 is emergency stop.")
@@ -2030,6 +3609,19 @@ class MainWindow(QMainWindow):
         self.focus_source_action.triggered.connect(self._focus_midi_path)
         self.file_menu.addAction(self.focus_source_action)
         self.file_menu.addSeparator()
+        self.song_action = QAction("Song Transposer (audio/MIDI cleanup)…", self)
+        self.song_action.setStatusTip("Clean a rough audio transcription or MIDI into a separate Source MIDI.")
+        self.song_action.triggered.connect(self.open_song_transposer)
+        self.file_menu.addAction(self.song_action)
+        self.audio_action = QAction("Convert audio to MIDI…", self)
+        self.audio_action.setStatusTip("Transcribe a clean audio stem with the isolated Basic Pitch runtime.")
+        self.audio_action.triggered.connect(self.open_audio_converter)
+        self.file_menu.addAction(self.audio_action)
+        self.separate_action = QAction("Separate audio stems (UVR)…", self)
+        self.separate_action.setStatusTip("Separate vocals and instrumental stems from an audio file using UVR.")
+        self.separate_action.triggered.connect(self.open_stem_separator)
+        self.file_menu.addAction(self.separate_action)
+        self.file_menu.addSeparator()
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
         self.file_menu.addAction(exit_action)
@@ -2068,15 +3660,21 @@ class MainWindow(QMainWindow):
             self.file_edit,
             self.browse_button,
             self.reload_button,
+            self.find_lyrics_button,
             self.tracks_box,
             self.section_box,
             self.simple_settings_panel,
             self.settings_tabs,
+            self.simple_fluid_phrasing_combo,
+            self.fluid_phrasing_combo,
         )
         self._plan_actions = (
             self.open_action,
             self.reload_action,
             self.focus_source_action,
+            self.song_action,
+            self.audio_action,
+            self.separate_action,
             self.prepare_action,
             self.reset_action,
         )
@@ -2178,6 +3776,9 @@ class MainWindow(QMainWindow):
             index = self.simple_performance_combo.findData(self.performance_combo.currentData())
             if index >= 0:
                 self.simple_performance_combo.setCurrentIndex(index)
+            _select_fluid_phrasing(
+                self.simple_fluid_phrasing_combo, int(self.fluid_phrasing_combo.currentData()),
+            )
 
             speed_percent = round(float(self.speed_spin.value()) * 100)
             self.simple_speed_slider.setValue(max(25, min(300, speed_percent)))
@@ -2210,6 +3811,16 @@ class MainWindow(QMainWindow):
         index = self.performance_combo.findData(self.simple_performance_combo.currentData())
         if index >= 0:
             self.performance_combo.setCurrentIndex(index)
+
+    def _simple_fluid_phrasing_changed(self, _index: int) -> None:
+        if not self._syncing_simple_ui:
+            _select_fluid_phrasing(
+                self.fluid_phrasing_combo, int(self.simple_fluid_phrasing_combo.currentData()),
+            )
+
+    def _fluid_phrasing_changed(self, _index: int) -> None:
+        if not self._loading_ui:
+            self.settings.fluid_phrasing = int(self.fluid_phrasing_combo.currentData())
 
     def _simple_speed_changed(self, value: int) -> None:
         self.simple_speed_value.setText(f"{value}%")
@@ -2277,7 +3888,6 @@ class MainWindow(QMainWindow):
             "<b>F8</b> — Emergency stop and panic release<br>"
             "<b>F9</b> — Play, pause, or resume<br>"
             "<b>F11</b> — Show or hide the window<br>"
-            "<b>Numpad /</b> — Toggle auto-walk while SCUM is focused<br>"
             "<b>Ctrl+Numpad 4/6</b> — Seek backward/forward 5s<br>"
             "<b>F1</b> — Quick start",
         )
@@ -2345,6 +3955,7 @@ class MainWindow(QMainWindow):
         self._refresh_simple_advisory()
 
         unlocked = not self._plan_controls_locked and not self._output_active()
+        self.find_lyrics_button.setEnabled(unlocked and self.project is not None)
         can_plan = unlocked and self.project is not None and bool(selected)
         self.prepare_button.setEnabled(can_plan)
         self.play_button.setEnabled(can_plan)
@@ -2605,6 +4216,7 @@ class MainWindow(QMainWindow):
         self.simple_show_advanced_button.clicked.connect(lambda _checked=False: self._set_ui_mode("advanced", save=True))
         self.simple_instrument_combo.currentIndexChanged.connect(self._simple_instrument_changed)
         self.simple_performance_combo.currentIndexChanged.connect(self._simple_performance_changed)
+        self.simple_fluid_phrasing_combo.currentIndexChanged.connect(self._simple_fluid_phrasing_changed)
         self.simple_speed_slider.valueChanged.connect(self._simple_speed_changed)
         self.simple_transpose_slider.valueChanged.connect(self._simple_transpose_changed)
         self.simple_countdown_slider.valueChanged.connect(self._simple_countdown_changed)
@@ -2643,6 +4255,7 @@ class MainWindow(QMainWindow):
         self.profile_combo.currentTextChanged.connect(self._profile_changed)
         self.performance_combo.currentIndexChanged.connect(self._performance_preset_changed)
         self.instrument_combo.currentIndexChanged.connect(self._instrument_changed)
+        self.fluid_phrasing_combo.currentIndexChanged.connect(self._fluid_phrasing_changed)
         self.arrangement_combo.currentIndexChanged.connect(self._update_chord_recognition_state)
         self.arrangement_lead_combo.currentIndexChanged.connect(self._arrangement_lead_changed)
         self.input_combo.currentIndexChanged.connect(self._refresh_workflow_state)
@@ -2684,6 +4297,7 @@ class MainWindow(QMainWindow):
             self.input_combo,
             self.instrument_combo,
             self.performance_combo,
+            self.fluid_phrasing_combo,
             self.arrangement_combo,
             self.chord_recognition_combo,
             self.ignore_percussion_check,
@@ -2720,6 +4334,7 @@ class MainWindow(QMainWindow):
                 widget.toggled.connect(self.invalidate_plan)
         self.instrument_combo.currentIndexChanged.connect(self._sync_simple_from_advanced)
         self.performance_combo.currentIndexChanged.connect(self._sync_simple_from_advanced)
+        self.fluid_phrasing_combo.currentIndexChanged.connect(self._sync_simple_from_advanced)
         self.speed_spin.valueChanged.connect(self._sync_simple_from_advanced)
         self.transpose_spin.valueChanged.connect(self._sync_simple_from_advanced)
         self.countdown_spin.valueChanged.connect(self._sync_simple_from_advanced)
@@ -2870,6 +4485,7 @@ class MainWindow(QMainWindow):
     def _load_settings_into_ui(self) -> None:
         self._loading_ui = True
         try:
+            self.auto_lyrics_check.setChecked(self.settings.auto_lyrics)
             self.profile_combo.setCurrentText(self.settings.profile_name)
             instrument_index = self.instrument_combo.findData(self.settings.target_instrument)
             self.instrument_combo.setCurrentIndex(max(0, instrument_index))
@@ -2893,6 +4509,7 @@ class MainWindow(QMainWindow):
             preset_index = self.performance_combo.findData(self.settings.performance_preset)
             self.performance_combo.setCurrentIndex(max(0, preset_index))
             self._load_performance_values_from_settings()
+            _select_fluid_phrasing(self.fluid_phrasing_combo, self.settings.fluid_phrasing)
             self.transpose_spin.setValue(self.settings.transpose)
             self.countdown_spin.setValue(self.settings.countdown_s)
             self.section_gap_spin.setValue(self.settings.section_gap_ms)
@@ -2938,6 +4555,7 @@ class MainWindow(QMainWindow):
         )
         self.settings.live_midi_max_polyphony = self.live_polyphony_spin.value()
         self.settings.performance_preset = str(self.performance_combo.currentData())
+        self.settings.fluid_phrasing = int(self.fluid_phrasing_combo.currentData())
         self.settings.arrangement_mode = str(self.arrangement_combo.currentData())
         self.settings.arrangement_lead_track = int(self.arrangement_lead_combo.currentData())
         self.settings.chord_recognition_mode = str(self.chord_recognition_combo.currentData())
@@ -2988,24 +4606,63 @@ class MainWindow(QMainWindow):
         if self._output_busy():
             return
         urls = event.mimeData().urls()
-        if urls and Path(urls[0].toLocalFile()).suffix.lower() in {".mid", ".midi"}:
+        if urls and Path(urls[0].toLocalFile()).suffix.lower() in ({".mid", ".midi"} | AUDIO_EXTENSIONS):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent) -> None:
         if self._output_busy():
             event.ignore()
-            self._set_status("Stop current output before loading another MIDI file.")
+            self._set_status("Stop current output before loading or converting another file.")
             return
         urls = event.mimeData().urls()
         if not urls:
             event.ignore()
             return
         path = urls[0].toLocalFile()
-        if Path(path).suffix.lower() not in {".mid", ".midi"}:
+        suffix = Path(path).suffix.lower()
+        if suffix in AUDIO_EXTENSIONS:
+            self.open_song_transposer(path)
+            event.acceptProposedAction()
+        elif suffix in {".mid", ".midi"}:
+            self.load_file(path)
+            event.acceptProposedAction()
+        else:
             event.ignore()
+
+    def open_audio_converter(self, initial_path: str | None = None) -> None:
+        if self._output_busy():
+            self._set_status("Stop current output before opening the audio converter.")
             return
-        self.load_file(path)
-        event.acceptProposedAction()
+        dialog = AudioConvertDialog(self)
+        if initial_path:
+            source = Path(initial_path)
+            dialog.input_edit.setText(str(source))
+            dialog.output_edit.setText(str(source.with_suffix(".transcribed.mid")))
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.converted_path:
+            self.load_file(str(dialog.converted_path))
+
+    def open_song_transposer(self, initial_path: str | None = None) -> None:
+        if self._output_busy():
+            self._set_status("Stop current output before opening Song Transposer.")
+            return
+        dialog = SongTransposerDialog(self)
+        candidate = initial_path or self.file_edit.text().strip()
+        if candidate and Path(candidate).suffix.lower() in (AUDIO_EXTENSIONS | {".mid", ".midi"}):
+            dialog.set_input_path(candidate)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.processed_path:
+            return
+        self.load_file(str(dialog.processed_path))
+        self._set_status("Transcription loaded. Use your playback settings to prepare it for SCUM.")
+
+    def open_stem_separator(self, initial_path: str | None = None) -> None:
+        if self._output_busy():
+            self._set_status("Stop current output before opening stem separation.")
+            return
+        dialog = SongTransposerDialog(self)
+        candidate = initial_path or self.file_edit.text().strip()
+        if candidate and Path(candidate).suffix.lower() in AUDIO_EXTENSIONS:
+            dialog.set_input_path(candidate)
+        dialog.exec()
 
     def _track_analysis_settings(self) -> AppSettings:
         """Read the current selection settings without saving or applying a performance preset."""
@@ -3232,7 +4889,10 @@ class MainWindow(QMainWindow):
             self.arrangement_lead_combo.blockSignals(False)
             self.settings.arrangement_lead_track = -1
         remembered_lead = self.settings.arrangement_lead_track
+        self.auto_lyrics.cancel()
         self.project = project
+        saved_lyrics = load_saved_lyrics(app_data_dir(), project.path)
+        self._external_lyrics = parse_lrc(saved_lyrics[0], saved_lyrics[1]) if saved_lyrics else None
         self.score_analysis = analyse_project(
             project,
             settings=replace(self._track_analysis_settings(), arrangement_lead_track=remembered_lead),
@@ -3324,6 +4984,7 @@ class MainWindow(QMainWindow):
         else:
             self._set_status("MIDI analysed and musical tracks selected. Press Prepare to build the SCUM score.")
         self._save_ui_to_settings()
+        self._request_automatic_lyrics()
 
     def selected_tracks(self) -> list[int]:
         result: list[int] = []
@@ -3434,12 +5095,24 @@ class MainWindow(QMainWindow):
                 f" · {len(self.active_selection.intervals)} selected segment(s)"
             )
         health = assess_performance(self.plan)
+        fluid_summary = ""
+        if self.settings.fluid_phrasing:
+            phrase_count = int(self.plan.diagnostics.get("fluid_phrase_count", 0))
+            fluid_label = next(
+                (label for label, strength in FLUID_PHRASING_OPTIONS if strength == self.settings.fluid_phrasing),
+                "Custom",
+            )
+            fluid_summary = (
+                f"Fluid phrasing · {fluid_label} "
+                f"({self.settings.fluid_phrasing}%) · {phrase_count:,} phrase(s)\n"
+            )
         self.summary_label.setText(
             f"Ready to play · {minutes}:{seconds:02d} at {effective_speed:.2f}×{section_summary}\n"
             f"{self.plan.retained_notes:,}/{self.plan.source_notes:,} notes retained · "
             f"{self.plan.event_count:,} key events · "
             f"{int(self.plan.diagnostics.get('score_chord_groups', 0)):,} chord groups\n"
             f"{preset_name} · {score_description} · {arrangement_name}\n"
+            f"{fluid_summary}"
             f"Performance health · {health.summary}"
         )
         self.runtime_health_label.setText("Last playback · not run for this preparation")
@@ -3447,6 +5120,16 @@ class MainWindow(QMainWindow):
         details = []
         details.append(f"Performance health: {health.summary}.")
         details.extend(health.recommendations)
+        if self.settings.fluid_phrasing:
+            connected = int(self.plan.diagnostics.get("fluid_connected_notes", 0))
+            released = int(self.plan.diagnostics.get("fluid_released_notes", 0))
+            shifted = int(self.plan.diagnostics.get("fluid_shifted_groups", 0))
+            max_shift = float(self.plan.diagnostics.get("fluid_max_shift_ms", 0.0))
+            details.append(
+                f"Fluid phrasing: {connected:,} melody note(s) connected, "
+                f"{released:,} overlap(s) released, {shifted:,} attack group(s) "
+                f"shaped by up to {max_shift:.1f} ms. Rests and the original MIDI are preserved."
+            )
         instrument_label = str(self.plan.diagnostics.get("target_instrument_label", "Instrument"))
         instrument_sustain_ms = int(self.plan.diagnostics.get("instrument_max_sustain_ms", 0))
         effective_sustain_ms = float(
@@ -3726,6 +5409,8 @@ class MainWindow(QMainWindow):
             self.backend, callbacks, initial_bank=self._known_scum_bank
         )
         self._active_playback_plan = plan
+        self._lyric_elapsed_ms = -1.0
+        self._configure_lyric_timeline(plan)
         require_focus = self.settings.require_scum_focus and self.settings.input_mode != "dry_run" and os.name == "nt"
         self.play_button.setEnabled(False)
         self.prepare_button.setEnabled(False)
@@ -3858,52 +5543,9 @@ class MainWindow(QMainWindow):
         self.activateWindow()
         self._refresh_workflow_state()
 
-    def toggle_hold_w(self) -> None:
-        if self._w_held:
-            try:
-                if self._walk_backend is not None:
-                    self._walk_backend.key_up("W")
-                    self._walk_backend.release_all()
-            except Exception as exc:
-                logger.warning("Failed to release W: %s", exc)
-            self._w_held = False
-            self._walk_backend = None
-            self._set_status("Auto-walk toggled OFF (W released).")
-        else:
-            if os.name == "nt" and not foreground_window_info(cache_ttl_s=0.0).is_scum:
-                self._set_status("Auto-walk was not enabled because SCUM is not focused.")
-                return
-            mode = str(self.input_combo.currentData())
-            if mode == "dry_run":
-                self._set_status("Auto-walk is disabled in Dry run mode.")
-                return
-            walk_backend = create_backend(mode)
-            if not walk_backend.available:
-                self._set_status("Auto-walk keyboard output is unavailable on this system.")
-                return
-            try:
-                walk_backend.key_down("W")
-            except Exception as exc:
-                logger.warning("Failed to hold W: %s", exc)
-                try:
-                    walk_backend.release_all()
-                except Exception:
-                    pass
-                self._set_status(f"Auto-walk could not start: {exc}")
-                return
-            self._walk_backend = walk_backend
-            self._w_held = True
-            self._set_status("Auto-walk ON. Numpad /, F8, or leaving SCUM releases W.")
-
     def _poll_global_hotkeys(self) -> None:
         if os.name != "nt":
             return
-        if self._w_held and not foreground_window_info().is_scum:
-            self.toggle_hold_w()
-        if emergency_stop_pressed() and self._w_held:
-            self.toggle_hold_w()
-        if numpad_divide_pressed():
-            self.toggle_hold_w()
         if function_key_pressed(9):
             self.play_pause_hotkey()
         if function_key_pressed(11):
@@ -3950,6 +5592,7 @@ class MainWindow(QMainWindow):
         self.full_timecode_label.setVisible(not compact)
         for widget in self.header_detail_widgets:
             widget.setVisible(not compact)
+        self.lyrics_panel.setVisible(compact)
         self.compact_hint.setVisible(compact)
         self.compact_header_widget.setVisible(compact)
         self.statusBar().setVisible(not compact)
@@ -3965,7 +5608,7 @@ class MainWindow(QMainWindow):
             self.compact_timecode_label.setText(f"00:00 / {_format_timecode_min_sec(duration)}")
             self.setWindowTitle(f"{APP_TITLE} — Player")
             self.showNormal()
-            self.resize(620, 136)
+            self.resize(620, 460 if self.lyrics_toggle.isChecked() else 174)
             screen = self.screen() or QApplication.primaryScreen()
             available = screen.availableGeometry()
             self.move(available.right() - self.width() - 14, available.top() + 14)
@@ -3980,8 +5623,6 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self.setGeometry(geometry))
 
     def stop(self) -> None:
-        if self._w_held:
-            self.toggle_hold_w()
         if self.live_midi and self.live_midi.running:
             self.live_midi.stop("stopped")
             self._set_status("Disarming live MIDI and releasing every key…")
@@ -4119,7 +5760,122 @@ class MainWindow(QMainWindow):
     def _set_progress(self, fraction: float) -> None:
         self.progress.setValue(max(0, min(1000, round(fraction * 1000))))
 
+    def _configure_lyric_timeline(self, plan: PlaybackPlan) -> None:
+        song_playback = self.project is not None and plan is self.plan
+        external = self._external_lyrics if song_playback else None
+        events = external if external is not None else (self.project.lyrics if song_playback else ())
+        taps = int(plan.diagnostics.get("initial_bank_taps", 0))
+        pre_roll = (
+            self.settings.modifier_release_ms
+            + taps * (float(plan.diagnostics.get("octave_tap_hold_ms", 18.0)) + self.settings.modifier_settle_ms)
+            if taps else 0.0
+        )
+        self._lyric_timeline = LyricTimeline(lyric_cues(
+            events,
+            timed_lines=external is not None,
+            speed=float(plan.diagnostics.get("effective_speed", 1.0)),
+            pre_roll_ms=pre_roll,
+            selection=self.active_selection if plan is self.plan else None,
+        ), end_ms=plan.duration_ms)
+        self._update_lyrics(self._lyric_elapsed_ms)
+
+    def _auto_lyrics_toggled(self, checked: bool) -> None:
+        if self._loading_ui:
+            return
+        self.settings.auto_lyrics = checked
+        save_settings(self.settings)
+        self._request_automatic_lyrics()
+
+    def _request_automatic_lyrics(self) -> None:
+        self.auto_lyrics.cancel()
+        if not self.project:
+            return
+        if self._external_lyrics is not None:
+            message = "Saved lyrics ready."
+        elif self.project.lyrics:
+            message = "Embedded lyrics ready."
+        elif not self.settings.auto_lyrics:
+            message = "Automatic lookup is off. Use Find lyrics."
+        else:
+            message = "Finding lyrics automatically..."
+            self.auto_lyrics.request(self.project.path, self.project.duration_ms / 1000)
+        self._auto_lyric_message = message
+        self.lyric_source_status.setText(message)
+        if self._compact_playback:
+            self._update_lyrics(self._lyric_elapsed_ms)
+
+    def _automatic_lyrics_ready(self, choice, message: str) -> None:
+        if not self.project or not self.settings.auto_lyrics or self._external_lyrics is not None:
+            return
+        if choice is not None:
+            source = f"LRCLIB: {choice.artist} - {choice.title} ({choice.album})"
+            self._external_lyrics = parse_lrc(choice.lrc)
+            message = f"Lyrics ready: {choice.artist} - {choice.title}"
+            try:
+                save_lyrics(app_data_dir(), self.project.path, choice.lrc, 0, source)
+            except OSError:
+                message += " (could not save; available this session)"
+            if self._active_playback_plan is self.plan and self.plan is not None:
+                self._configure_lyric_timeline(self.plan)
+        self._auto_lyric_message = message
+        self.lyric_source_status.setText(message)
+        if self._compact_playback:
+            self._update_lyrics(self._lyric_elapsed_ms)
+
+    def _find_lyrics(self) -> None:
+        if self._output_busy():
+            self._set_status("Stop playback before changing lyrics.")
+            return
+        if not self.project:
+            self._set_status("Open a MIDI first, then choose Find lyrics.")
+            return
+        self.auto_lyrics.cancel()
+        path = self.project.path
+        dialog = LyricsDialog(path, load_saved_lyrics(app_data_dir(), path), self)
+        # Global playback shortcuts must not start output while choosing lyrics.
+        self._set_plan_controls_enabled(False)
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            offset_ms = dialog.offset.value() * 1000
+            cues = parse_lrc(dialog.selected_lrc, offset_ms)
+            if not cues:
+                return
+            try:
+                save_lyrics(app_data_dir(), path, dialog.selected_lrc, offset_ms, dialog.selected_source)
+            except OSError as exc:
+                QMessageBox.warning(self, APP_TITLE, f"Could not save lyrics: {exc}")
+                return
+            self._external_lyrics = cues
+            self.lyric_source_status.setText(f"Lyrics ready: {dialog.selected_source}")
+            self._set_status(f"Lyrics ready: {dialog.selected_source}. Expand + Lyrics during playback.")
+        finally:
+            self._set_plan_controls_enabled(True)
+            dialog.deleteLater()
+            if self._external_lyrics is None:
+                self._request_automatic_lyrics()
+
+    def _toggle_lyrics(self, expanded: bool) -> None:
+        self.lyrics_toggle.setText("- Lyrics" if expanded else "+ Lyrics")
+        self.karaoke_view.setVisible(expanded)
+        self.lyrics_label.setVisible(expanded)
+        if self._compact_playback:
+            self.centralWidget().layout().activate()
+            self.resize(self.width(), 460 if expanded else 174)
+
+    def _update_lyrics(self, elapsed_ms: float) -> None:
+        frame = self._lyric_timeline.frame_at(elapsed_ms)
+        message = ""
+        if not self._lyric_timeline.cues:
+            message = self._auto_lyric_message or "No lyrics loaded. Stop playback and choose Find lyrics."
+        elif not frame.current:
+            message = "Get ready" if elapsed_ms < self._lyric_timeline.times[0] else "Instrumental"
+        self.karaoke_view.show_frame(frame, message)
+
     def _set_timecode(self, elapsed_ms: float, total_ms: float) -> None:
+        self._lyric_elapsed_ms = elapsed_ms
+        if self._compact_playback:
+            self._update_lyrics(elapsed_ms)
         elapsed_str = _format_timecode_min_sec(elapsed_ms)
         total_str = _format_timecode_min_sec(total_ms)
         remaining_ms = max(0.0, total_ms - elapsed_ms)
@@ -4243,11 +5999,10 @@ class MainWindow(QMainWindow):
         self._refresh_track_selection_state()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self.auto_lyrics.shutdown()
         self._last_file_timer.stop()
         self.hotkey_timer.stop()
         self.focus_timer.stop()
-        if self._w_held:
-            self.toggle_hold_w()
         if self.live_midi:
             self.live_midi.stop("application closed")
             self.live_midi.wait(0.5)

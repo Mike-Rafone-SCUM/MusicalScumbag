@@ -1,0 +1,12 @@
+numpy==1.26.4
+librosa==0.11.0
+einops==0.8.2
+transformers==4.45.1
+lightning==2.4.0
+pytorch-lightning==2.4.0
+wandb==0.18.7
+deprecated==1.2.18
+mir_eval==0.8.2
+mido==1.3.3
+torchcrepe==0.0.24
+resampy==0.4.3
