@@ -30,6 +30,18 @@ def _choose(combo, value):
     combo.setCurrentIndex(index)
 
 
+def test_lead_fidelity_selection_saves_and_invalidates_plan(fluid_window):
+    window = fluid_window
+    _choose(window.performance_combo, "custom")
+    window.plan = object()
+    _choose(window.mapping_combo, "lead_fidelity")
+    assert window.plan is None
+    window._save_ui_to_settings()
+    assert window.settings.mapping_mode == "lead_fidelity"
+    assert "traced lead" in window.mapping_help_label.text()
+    assert load_settings().mapping_mode == "lead_fidelity"
+
+
 def test_fluid_controls_sync_and_invalidate_without_changing_quality(fluid_window):
     window = fluid_window
     assert window.performance_combo.currentData() == "optimal"

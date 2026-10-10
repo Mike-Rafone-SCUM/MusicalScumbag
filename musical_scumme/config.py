@@ -58,7 +58,7 @@ MAPPING_MODE_ALIASES = {
     "melody3": "melody3_contour",
     "match3": "match3_adaptive",
 }
-ENHANCED_MAPPING_MODES = frozenset(MAPPING_MODE_ALIASES.values())
+ENHANCED_MAPPING_MODES = frozenset(MAPPING_MODE_ALIASES.values()) | {"lead_fidelity"}
 
 
 PERFORMANCE_PRESETS: dict[str, dict[str, Any]] = {

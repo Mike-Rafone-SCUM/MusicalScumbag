@@ -786,6 +786,7 @@ class MappingComparisonDialog(QDialog):
         layout.addWidget(summary)
 
         modes = [
+            ("lead_fidelity", "Lead Fidelity", "Protect traced lead pitch, then ensemble fit and contour"),
             ("fold_smart", "Fold", "Safe base-bank fold with unison C preservation"),
             ("match3_adaptive", "Pitch Match", "Adaptive song-register shift + 3-octave coverage"),
             ("strict_auto", "Strict Range", "Single whole-octave shift, omits out-of-range notes"),
@@ -3100,6 +3101,7 @@ class MainWindow(QMainWindow):
         self.mapping_combo.addItem("Strict Range · omit notes outside one octave", "strict_auto")
         self.mapping_combo.addItem("Melody Contour · protect the lead line", "melody3_contour")
         self.mapping_combo.addItem("Harmonic · balance bass, melody and chords", "smart3_harmonic")
+        self.mapping_combo.addItem("Lead Fidelity · protect lead pitch before backing", "lead_fidelity")
         _fit_combo_to_panel(self.mapping_combo)
         self.compare_mappings_button = QPushButton("Compare")
         self.compare_mappings_button.setObjectName("secondary")
@@ -3113,6 +3115,7 @@ class MainWindow(QMainWindow):
         mapping_row.addWidget(self.compare_mappings_button)
         mapping_form.addRow("Range strategy", mapping_row)
         mapping_guides = {
+            "lead_fidelity": "Protects the traced lead register first, then backing and contour. Uses one bank per onset; safety budgets may fold notes. Compare and audition before choosing.",
             "fold_smart": "No octave-switch taps during the song. Notes are folded into SCUM's base bank; octave doubles can merge.",
             "strict_auto": "Centres the song around one octave and omits anything still outside C4-C5. Predictable, but can lose notes.",
             "match3_adaptive": "Fits the overall register, then uses octave switches when useful. A good general-purpose mapping for wider songs.",

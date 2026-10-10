@@ -946,6 +946,76 @@ def _melody_register_sequence_contour(groups: list[list[MidiNote]], settings: Ap
 
 
 
+def _lead_fidelity_sequence(
+    groups: list[list[MidiNote]], settings: AppSettings, lead_notes: set[MidiNote],
+) -> dict[int, int]:
+    """Protect traced lead register before ensemble fit, contour and bank travel.
+
+    Each onset uses one global bank. A true source rest resets contour cost;
+    sustained accompaniment does not masquerade as a phrase break. Without a
+    traced lead, the strongest source attack is a deterministic fallback.
+    Physical switch budgets and timing guards are applied by the shared planner.
+    """
+    if not groups:
+        return {}
+    states = (0, -1, 1)
+    rows = {state: (0.0, 0.0, 0.0, 0.0) for state in states}
+    parents = []
+    anchors = []
+    sounding_until = 0.0
+    active_leads: list[MidiNote] = []
+    _, switch_weight = _mapping_policy_weights(settings)
+    for index, group in enumerate(groups):
+        start = min(n.start_ms for n in group)
+        active_leads = [n for n in active_leads if n.end_ms > start]
+        active_leads.extend(note for note in group if note in lead_notes)
+        leads = active_leads
+        anchor = max(leads or group, key=lambda n: (n.velocity, n.pitch, -n.track_index))
+        pitch = max(0, min(127, anchor.pitch + settings.transpose))
+        anchors.append(pitch)
+        rest = max(0.0, start - sounding_until)
+        sounding_until = max(sounding_until, max(n.end_ms for n in group))
+        current = {}
+        links = {}
+        for state in states:
+            low, high = 60 + state * 12, 72 + state * 12
+            losses = [
+                (n, abs(_fold_to_window(p, low, high) - p))
+                for n in group for p in [max(0, min(127, n.pitch + settings.transpose))]
+            ]
+            lead_loss = sum(
+                abs(_fold_to_window(p, low, high) - p)
+                for n in (leads or [anchor])
+                for p in [max(0, min(127, n.pitch + settings.transpose))]
+            )
+            ensemble_loss = sum(loss * (0.35 + n.velocity / 127.0) for n, loss in losses)
+            candidates = {}
+            for previous in states:
+                old = rows[previous]
+                distortion = 0.0
+                if index and rest < 250.0:
+                    mapped_interval = _fold_to_window(pitch, low, high) - _fold_to_window(
+                        anchors[index - 1], 60 + previous * 12, 72 + previous * 12,
+                    )
+                    distortion = abs(mapped_interval - (pitch - anchors[index - 1]))
+                travel = abs(state - previous) * switch_weight * (0.25 if rest >= 250.0 else 1.0)
+                candidates[previous] = (
+                    old[0] + lead_loss, old[1] + ensemble_loss,
+                    old[2] + distortion, old[3] + travel,
+                )
+            parent = min(states, key=lambda p: (candidates[p], p != state, abs(p)))
+            current[state] = candidates[parent]
+            links[state] = parent
+        rows = current
+        parents.append(links)
+    state = min(states, key=lambda s: (rows[s], abs(s)))
+    sequence = [state]
+    for index in range(len(groups) - 1, 0, -1):
+        state = parents[index][state]
+        sequence.append(state)
+    return dict(enumerate(reversed(sequence)))
+
+
 def _stabilize_short_modifier_excursions(
     groups: list[list[MidiNote]],
     sequence: dict[int, int],
@@ -1786,7 +1856,9 @@ def build_playback_plan(
             settings,
             transpose=settings.transpose + automatic_pitch_shift,
         )
-    if settings.mapping_mode == "smart3_harmonic":
+    if settings.mapping_mode == "lead_fidelity":
+        smart_modifiers = _lead_fidelity_sequence(onset_groups, mapping_settings, lead_notes)
+    elif settings.mapping_mode == "smart3_harmonic":
         smart_modifiers = _smart_register_sequence_harmonic(
             onset_groups, settings, lead_notes
         )
@@ -1873,6 +1945,11 @@ def build_playback_plan(
                 f"Folded {smoothed_modifier_notes:,} note(s) in {smoothed_modifier_groups:,} brief octave-transition "
                 "group(s) into the surrounding register to prevent Ctrl/Shift blips."
             )
+    elif settings.mapping_mode == "lead_fidelity":
+        warnings.append(
+            "Lead Fidelity protects traced lead register before accompaniment fit and contour. "
+            "Each onset shares one octave bank; physical switch budgets can still require folding."
+        )
     elif settings.mapping_mode == "match3_adaptive":
         exact_before_folding = sum(
             48 <= note.pitch + mapping_settings.transpose <= 84 for note in source_notes
@@ -1917,6 +1994,7 @@ def build_playback_plan(
                 "match3_adaptive",
                 "melody3_contour",
                 "smart3_harmonic",
+                "lead_fidelity",
             }
             or solo_adaptive_mapping
         ),

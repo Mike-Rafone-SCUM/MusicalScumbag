@@ -1,3 +1,9 @@
+## 3.9.5 — 2026-10-10
+
+- Add opt-in Lead Fidelity range strategy and mapping comparison: protect traced lead register, including sustained lead over offbeat backing, before ensemble fit, contour and bank movement.
+- Retain physical bank-switch budgets, standalone taps, source MIDI and existing strategies. Select Custom to audition.
+- 1,116 tests, offscreen windows, Ruff and compilation pass. Current-game musical audition and new representative MP3/WAV/M4A transcription validation remain pending.
+
 ## 3.9.4 — 2026-10-06
 
 - Add selectable UVR vocal de-echo/dereverb and gentle learned denoise after aligned multi-pass stem separation. Preserve untreated stems and record treatment provenance to prevent accidental reuse of older raw-only passes.
